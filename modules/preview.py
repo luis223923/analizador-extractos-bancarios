@@ -8,16 +8,11 @@ importes coloreados, fechas legibles, filtros interactivos y moneda dinámica.
 import pandas as pd
 import streamlit as st
 
-from core.schema import MONEDA_PREFIJO
+from core.schema import fmt_amount
 
 
-def _fmt_metric(value: float, moneda: str) -> str:
-    """Formatea un número con el prefijo de moneda correcto."""
-    prefix = MONEDA_PREFIJO.get(moneda, "")
-    abs_val = abs(value)
-    formatted = f"{abs_val:,.2f}"
-    result = f"{prefix} {formatted}".strip() if prefix else formatted
-    return f"-{result}" if value < 0 else result
+# Alias para compatibilidad interna del módulo
+_fmt_metric = fmt_amount
 
 
 def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:

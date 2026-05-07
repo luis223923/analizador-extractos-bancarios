@@ -7,7 +7,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from core.schema import MONEDA_PREFIJO
+from core.schema import fmt_amount
 
 
 def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:

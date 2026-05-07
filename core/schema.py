@@ -47,6 +47,23 @@ MONEDA_PREFIJO = {
 }
 
 
+def fmt_amount(value, moneda: str) -> str:
+    """
+    Formatea un número con el prefijo de moneda correcto.
+    Ej: fmt_amount(1500, 'BOB') → 'Bs 1,500.00'
+        fmt_amount(-800, 'USD') → '-USD 800.00'
+        fmt_amount(999, 'Sin definir') → '999.00'
+    """
+    try:
+        v = float(value)
+        prefix = MONEDA_PREFIJO.get(moneda, "")
+        formatted = f"{abs(v):,.2f}"
+        result = f"{prefix} {formatted}".strip() if prefix else formatted
+        return f"-{result}" if v < 0 else result
+    except (ValueError, TypeError):
+        return ""
+
+
 def empty_standard_df() -> pd.DataFrame:
     """Devuelve un DataFrame vacío con el esquema estándar."""
     return pd.DataFrame(columns=STANDARD_COLUMNS)

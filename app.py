@@ -82,7 +82,7 @@ def render_main_tabs(df: pd.DataFrame, moneda: str):
     ])
     with tab1: render_preview(df, moneda)
     with tab2: render_classifier(df)
-    with tab3: render_balances(df)
+    with tab3: render_balances(df, moneda)
     with tab4: render_duplicates(df)
     with tab5: render_exporter(df, moneda)
 
@@ -364,7 +364,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: moneda configurable")
+st.caption("Versión: módulo de saldos por fecha implementado")
 st.divider()
 
 moneda = st.session_state.moneda_seleccionada
