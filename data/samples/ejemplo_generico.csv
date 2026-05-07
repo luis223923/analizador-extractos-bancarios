@@ -1,0 +1,14 @@
+Fecha;Concepto;Importe;Saldo;Referencia
+01/01/2025;Saldo inicial;;10000,00;
+03/01/2025;Transferencia recibida CLIENTE A;5000,00;15000,00;REF-001
+05/01/2025;Pago proveedor SUMINISTROS SL;-1200,00;13800,00;REF-002
+07/01/2025;Nóminas enero;-8500,00;5300,00;REF-003
+10/01/2025;Ingreso venta online;320,50;5620,50;REF-004
+12/01/2025;Recibo alquiler oficina;-950,00;4670,50;REF-005
+15/01/2025;Transferencia recibida CLIENTE B;2800,00;7470,50;REF-006
+18/01/2025;Pago seguros anuales;-1500,00;5970,50;REF-007
+20/01/2025;Comisión bancaria;-25,00;5945,50;REF-008
+22/01/2025;Ingreso subvención;10000,00;15945,50;REF-009
+25/01/2025;Pago IVA trimestral;-3200,00;12745,50;REF-010
+28/01/2025;Gastos viaje comercial;-450,00;12295,50;REF-011
+31/01/2025;Factura servicios TI;-800,00;11495,50;REF-012
