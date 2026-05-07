@@ -39,7 +39,7 @@ def render_exporter(df: pd.DataFrame) -> None:
     cols += ["banco", "cuenta", "archivo"]
 
     export_df = df[cols].copy()
-    export_df["fecha"] = export_df["fecha"].dt.strftime("%d/%m/%Y")
+    export_df["fecha"] = pd.to_datetime(export_df["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
 
     excel_bytes = _to_excel(export_df)
 
