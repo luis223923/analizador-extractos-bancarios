@@ -347,6 +347,10 @@ with st.sidebar:
 
 
 # ─── Área principal ───────────────────────────────────────────────────────
+st.title("Analizador de Extractos Bancarios")
+st.caption("Versión: parser flexible con mapeo manual")
+st.divider()
+
 cola = st.session_state.cola_mapeo
 df   = st.session_state.df_consolidado
 
