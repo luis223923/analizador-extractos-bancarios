@@ -19,6 +19,7 @@ STANDARD_COLUMNS = [
     "referencia",   # str       — número de referencia/operación (puede ser NaN)
     "banco",        # str       — nombre del banco origen
     "cuenta",       # str       — número de cuenta / IBAN parcial (puede ser NaN)
+    "moneda",       # str       — código de moneda: BOB, USD, EUR, Sin definir
     "archivo",      # str       — nombre del archivo cargado
 ]
 
@@ -30,7 +31,19 @@ COLUMN_DTYPES = {
     "referencia": "object",
     "banco": "object",
     "cuenta": "object",
+    "moneda": "object",
     "archivo": "object",
+}
+
+# Opciones de moneda disponibles en la interfaz
+MONEDAS = ["BOB", "USD", "EUR", "Sin definir"]
+
+# Prefijo de símbolo para cada moneda
+MONEDA_PREFIJO = {
+    "BOB": "Bs",
+    "USD": "USD",
+    "EUR": "EUR",
+    "Sin definir": "",
 }
 
 

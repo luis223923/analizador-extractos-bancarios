@@ -8,7 +8,7 @@ import pandas as pd
 
 from core.loader import load_file, reload_excel
 from core.normalizer import normalize, normalize_with_mapping, diagnose, get_registered_banks
-from core.schema import empty_standard_df
+from core.schema import empty_standard_df, MONEDAS
 from modules.preview import render_preview
 from modules.classifier import render_classifier
 from modules.balances import render_balances
@@ -30,10 +30,11 @@ if "df_consolidado" not in st.session_state:
 if "archivos_cargados" not in st.session_state:
     st.session_state.archivos_cargados = []   # [(filename, parser_name, n_rows)]
 
-# Archivos que no se pudieron parsear automáticamente y esperan mapeo manual.
-# Cada elemento: {filename, raw_bytes, ext, sheets, selected_sheet, header_row, df_raw, diagnostic}
 if "cola_mapeo" not in st.session_state:
     st.session_state.cola_mapeo = []
+
+if "moneda_seleccionada" not in st.session_state:
+    st.session_state.moneda_seleccionada = "BOB"
 
 
 # ─── Funciones de renderizado ─────────────────────────────────────────────
@@ -47,10 +48,11 @@ def render_welcome():
         analiza movimientos y prepara informes de Tesorería, **sin instalar nada**.
 
         **Cómo empezar:**
-        1. Abre el panel lateral (↖) y sube uno o varios archivos Excel o CSV.
-        2. Pulsa **Procesar archivos**.
-        3. Si el sistema reconoce el formato → los datos aparecen de inmediato.
-        4. Si no lo reconoce → verás una pantalla de mapeo para asignar columnas manualmente.
+        1. Selecciona la **moneda** del extracto en el panel lateral.
+        2. Sube uno o varios archivos Excel o CSV.
+        3. Pulsa **Procesar archivos**.
+        4. Si el sistema reconoce el formato → los datos aparecen de inmediato.
+        5. Si no lo reconoce → verás una pantalla de mapeo para asignar columnas.
         """
     )
     with st.expander("¿Qué estructura debe tener mi archivo?"):
@@ -69,27 +71,25 @@ def render_welcome():
             | Referencia | Referencia, Folio, Voucher, N° Op., Comprobante… |
 
             Si el archivo tiene encabezados en filas inferiores o varias hojas,
-            el sistema los detecta automáticamente. Si aun así falla, te pedirá
-            que asignes las columnas manualmente.
+            el sistema los detecta automáticamente.
             """
         )
 
 
-def render_main_tabs(df: pd.DataFrame):
+def render_main_tabs(df: pd.DataFrame, moneda: str):
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Vista previa", "Clasificación", "Saldos", "Duplicados", "Exportar",
     ])
-    with tab1: render_preview(df)
+    with tab1: render_preview(df, moneda)
     with tab2: render_classifier(df)
     with tab3: render_balances(df)
     with tab4: render_duplicates(df)
-    with tab5: render_exporter(df)
+    with tab5: render_exporter(df, moneda)
 
 
-def render_mapping_ui(pending: dict):
+def render_mapping_ui(pending: dict, moneda: str):
     """
     Pantalla de mapeo manual para un archivo que no se pudo parsear automáticamente.
-    Permite cambiar hoja y fila de encabezado, ver diagnóstico y asignar columnas.
     """
     filename  = pending["filename"]
     raw_bytes = pending["raw_bytes"]
@@ -219,6 +219,7 @@ def render_mapping_ui(pending: dict):
             }
             try:
                 df_std, parser_name = normalize_with_mapping(df_raw, mapping, filename)
+                df_std["moneda"] = moneda
                 st.session_state.df_consolidado = pd.concat(
                     [st.session_state.df_consolidado, df_std],
                     ignore_index=True,
@@ -236,7 +237,6 @@ def render_mapping_ui(pending: dict):
             st.session_state.cola_mapeo.pop(0)
             st.rerun()
 
-    # ── Mini-resumen de datos ya consolidados ─────────────────────────────
     if not st.session_state.df_consolidado.empty:
         n = len(st.session_state.df_consolidado)
         st.divider()
@@ -252,6 +252,21 @@ with st.sidebar:
     st.caption("Herramienta de Tesorería")
     st.divider()
 
+    # ── Selector de moneda ────────────────────────────────────────────────
+    st.subheader("Moneda del extracto")
+    moneda_sel = st.selectbox(
+        "Selecciona la moneda",
+        MONEDAS,
+        index=MONEDAS.index(st.session_state.moneda_seleccionada),
+        key="sidebar_moneda",
+        label_visibility="collapsed",
+    )
+    st.session_state.moneda_seleccionada = moneda_sel
+    st.caption(f"Moneda seleccionada: **{moneda_sel}**")
+
+    st.divider()
+
+    # ── Carga de archivos ─────────────────────────────────────────────────
     st.subheader("Cargar extractos")
     uploaded_files = st.file_uploader(
         "Selecciona archivos",
@@ -262,6 +277,7 @@ with st.sidebar:
 
     if uploaded_files:
         if st.button("Procesar archivos", type="primary", use_container_width=True):
+            moneda_actual = st.session_state.moneda_seleccionada
             nuevos_frames = []
             errores = []
             necesitan_mapeo = 0
@@ -278,12 +294,12 @@ with st.sidebar:
 
                     if resultado is not None:
                         df_std, parser_name = resultado
+                        df_std["moneda"] = moneda_actual   # asignar moneda
                         nuevos_frames.append(df_std)
                         st.session_state.archivos_cargados.append(
                             (info.filename, parser_name, len(df_std))
                         )
                     else:
-                        # Sin parser automático → mapeo manual
                         diag = diagnose(info.df_raw)
                         st.session_state.cola_mapeo.append({
                             "filename":       info.filename,
@@ -348,15 +364,16 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: parser flexible con mapeo manual")
+st.caption("Versión: moneda configurable")
 st.divider()
 
-cola = st.session_state.cola_mapeo
-df   = st.session_state.df_consolidado
+moneda = st.session_state.moneda_seleccionada
+cola   = st.session_state.cola_mapeo
+df     = st.session_state.df_consolidado
 
 if cola:
-    render_mapping_ui(cola[0])
+    render_mapping_ui(cola[0], moneda)
 elif not df.empty:
-    render_main_tabs(df)
+    render_main_tabs(df, moneda)
 else:
     render_welcome()
