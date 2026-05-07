@@ -1,42 +1,65 @@
 """
 Esquema estándar de columnas para todos los extractos bancarios.
 
-Cualquier parser de banco debe producir un DataFrame con exactamente
-estas columnas. Esto garantiza que todos los módulos (clasificador,
-saldos, duplicados, exportador) funcionen con cualquier banco.
+Los parsers producen las CORE_COLUMNS. Las columnas extendidas son
+añadidas por app.py a partir de los metadatos ingresados por el usuario.
 """
 
-from dataclasses import dataclass
-from typing import Optional
 import pandas as pd
 
-# Columnas canónicas del sistema — no modificar sin actualizar todos los módulos
-STANDARD_COLUMNS = [
+# Columnas producidas por los parsers (requeridas por validate_standard_df)
+_CORE_COLUMNS = [
     "fecha",        # datetime  — fecha de la operación
-    "descripcion",  # str       — texto libre del concepto
+    "descripcion",  # str       — concepto del movimiento
     "importe",      # float     — positivo=ingreso, negativo=gasto
     "saldo",        # float     — saldo tras la operación (puede ser NaN)
-    "referencia",   # str       — número de referencia/operación (puede ser NaN)
-    "banco",        # str       — nombre del banco origen
-    "cuenta",       # str       — número de cuenta / IBAN parcial (puede ser NaN)
-    "moneda",       # str       — código de moneda: BOB, USD, EUR, Sin definir
+    "referencia",   # str       — número de referencia / folio
+    "banco",        # str       — nombre del banco (asignado por el parser)
+    "cuenta",       # str       — número de cuenta detectado en el archivo
     "archivo",      # str       — nombre del archivo cargado
 ]
 
+# Columnas extendidas añadidas por app.py con los metadatos del usuario
+_EXTENDED_COLUMNS = [
+    "empresa",      # str       — empresa propietaria de la cuenta
+    "nombre_corto", # str       — alias corto de la cuenta (ej. "BNB Cte BOB")
+    "moneda",       # str       — código de moneda: BOB, USD, EUR, Sin definir
+    "tipo_cuenta",  # str       — Corriente, Ahorro, Vista, Plazo Fijo, Otra
+    "debito",       # float     — valor absoluto del egreso (>= 0)
+    "credito",      # float     — valor absoluto del ingreso (>= 0)
+    "hoja_origen",  # str       — hoja del Excel de origen
+    "fila_origen",  # str       — fila aproximada en el archivo de origen
+    "observaciones",# str       — notas libres
+]
+
+# Esquema completo del sistema
+STANDARD_COLUMNS = _CORE_COLUMNS + _EXTENDED_COLUMNS
+
 COLUMN_DTYPES = {
-    "fecha": "datetime64[ns]",
-    "descripcion": "object",
-    "importe": "float64",
-    "saldo": "float64",
-    "referencia": "object",
-    "banco": "object",
-    "cuenta": "object",
-    "moneda": "object",
-    "archivo": "object",
+    "fecha":        "datetime64[ns]",
+    "descripcion":  "object",
+    "importe":      "float64",
+    "saldo":        "float64",
+    "referencia":   "object",
+    "banco":        "object",
+    "cuenta":       "object",
+    "archivo":      "object",
+    "empresa":      "object",
+    "nombre_corto": "object",
+    "moneda":       "object",
+    "tipo_cuenta":  "object",
+    "debito":       "float64",
+    "credito":      "float64",
+    "hoja_origen":  "object",
+    "fila_origen":  "object",
+    "observaciones":"object",
 }
 
-# Opciones de moneda disponibles en la interfaz
+# Opciones de moneda disponibles
 MONEDAS = ["BOB", "USD", "EUR", "Sin definir"]
+
+# Tipos de cuenta disponibles
+TIPOS_CUENTA = ["Sin definir", "Corriente", "Ahorro", "Vista", "Plazo Fijo", "Otra"]
 
 # Prefijo de símbolo para cada moneda
 MONEDA_PREFIJO = {
@@ -65,14 +88,17 @@ def fmt_amount(value, moneda: str) -> str:
 
 
 def empty_standard_df() -> pd.DataFrame:
-    """Devuelve un DataFrame vacío con el esquema estándar."""
+    """Devuelve un DataFrame vacío con el esquema estándar completo."""
     return pd.DataFrame(columns=STANDARD_COLUMNS)
 
 
 def validate_standard_df(df: pd.DataFrame) -> list[str]:
-    """Devuelve lista de errores de validación; lista vacía = OK."""
+    """
+    Valida que el DataFrame tenga las columnas core requeridas.
+    Las columnas extendidas son opcionales (las añade app.py).
+    """
     errors = []
-    missing = [c for c in STANDARD_COLUMNS if c not in df.columns]
+    missing = [c for c in _CORE_COLUMNS if c not in df.columns]
     if missing:
         errors.append(f"Columnas faltantes: {missing}")
     if not missing and not pd.api.types.is_datetime64_any_dtype(df["fecha"]):

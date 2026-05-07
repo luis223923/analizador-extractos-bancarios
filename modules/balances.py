@@ -1,105 +1,121 @@
 """
-Módulo de saldos por fecha de corte.
+Módulo de disponibilidad bancaria por fecha de corte.
 
-Calcula el saldo de cada combinación banco/cuenta/moneda para una fecha
-dada, usando el último saldo disponible del extracto o, si no existe,
-la suma acumulada de importes (saldo estimado).
+Calcula el saldo de cada combinación empresa/banco/cuenta/moneda
+para una fecha dada, usando el último saldo disponible del extracto
+o, si no existe, la suma acumulada de importes (saldo estimado).
 """
 
 import io
 import datetime
+import traceback
 import pandas as pd
 import streamlit as st
 
 from core.schema import fmt_amount
 
 
-# ─── Normalización defensiva ──────────────────────────────────────────────
+# ─── Normalización defensiva ──────────────────────────────────────────────────
 
-def _normalize_df(df: pd.DataFrame, moneda_default: str) -> pd.DataFrame:
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Garantiza que el DataFrame tenga las columnas requeridas en minúsculas.
-    Acepta columnas con nombre en mayúsculas o minúsculas.
+    Garantiza que el DataFrame tenga todas las columnas requeridas en minúsculas.
     Añade columnas faltantes con valores neutros en lugar de fallar.
     """
     df = df.copy()
-
-    # Normalizar nombres de columna a minúsculas sin espacios extra
     df.columns = [str(c).strip().lower() for c in df.columns]
 
-    # Columnas requeridas con su valor por defecto si no existen
     defaults = {
-        "fecha":       pd.NaT,
-        "importe":     float("nan"),
-        "saldo":       float("nan"),
-        "banco":       "Sin identificar",
-        "cuenta":      "No identificada",
-        "moneda":      moneda_default,
-        "archivo":     "",
-        "descripcion": "",
-        "referencia":  "",
+        "fecha":        pd.NaT,
+        "importe":      float("nan"),
+        "saldo":        float("nan"),
+        "debito":       float("nan"),
+        "credito":      float("nan"),
+        "banco":        "Sin identificar",
+        "cuenta":       "No identificada",
+        "nombre_corto": "",
+        "empresa":      "Sin identificar",
+        "moneda":       "Sin definir",
+        "tipo_cuenta":  "Sin definir",
+        "archivo":      "",
+        "hoja_origen":  "",
+        "fila_origen":  "",
+        "descripcion":  "",
+        "referencia":   "",
+        "observaciones":"",
     }
     for col, default in defaults.items():
         if col not in df.columns:
             df[col] = default
 
+    # nombre_corto vacío → usar cuenta
+    mask_nc = df["nombre_corto"].isna() | (df["nombre_corto"].astype(str).str.strip() == "")
+    df.loc[mask_nc, "nombre_corto"] = df.loc[mask_nc, "cuenta"]
+
     return df
 
 
-# ─── Lógica de cálculo ────────────────────────────────────────────────────
+# ─── Lógica de cálculo ────────────────────────────────────────────────────────
 
 def compute_saldos_corte(
     df: pd.DataFrame,
     fecha_corte: datetime.date,
-    moneda_default: str = "Sin definir",
 ) -> tuple:
     """
-    Calcula el saldo por banco/cuenta/moneda a la fecha de corte.
+    Calcula el saldo por empresa/banco/cuenta/moneda a la fecha de corte.
 
     Returns:
         (df_saldos, df_corte, df_post)
-        df_saldos  — una fila por grupo banco/cuenta/moneda
+        df_saldos  — una fila por grupo con saldo a la fecha de corte
         df_corte   — movimientos con fecha <= fecha_corte
         df_post    — movimientos con fecha > fecha_corte
     """
-    _EMPTY = pd.DataFrame(columns=[
-        "banco", "cuenta", "moneda", "fecha_ult_mov",
-        "saldo_corte", "es_estimado", "archivo", "observacion",
+    _EMPTY_SALDOS = pd.DataFrame(columns=[
+        "empresa", "banco", "cuenta", "nombre_corto", "moneda",
+        "fecha_ult_mov", "saldo_corte", "es_estimado", "archivo", "observacion",
     ])
     _EMPTY_MOV = pd.DataFrame()
 
-    df = _normalize_df(df, moneda_default)
-
+    df = _normalize_df(df)
     df["fecha"]   = pd.to_datetime(df["fecha"],  errors="coerce")
     df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0.0)
-    df["saldo"]   = pd.to_numeric(df["saldo"],   errors="coerce")   # NaN si no hay
-
+    df["saldo"]   = pd.to_numeric(df["saldo"],   errors="coerce")
     df = df.dropna(subset=["fecha"])
+
     if df.empty:
-        return _EMPTY, _EMPTY_MOV, _EMPTY_MOV
+        return _EMPTY_SALDOS, _EMPTY_MOV, _EMPTY_MOV
 
     # Normalizar campos de agrupación
-    for col, fallback in [("cuenta", "No identificada"), ("moneda", moneda_default), ("banco", "Sin identificar")]:
+    _FALLBACKS = {
+        "empresa":      "Sin identificar",
+        "banco":        "Sin identificar",
+        "cuenta":       "No identificada",
+        "nombre_corto": "",
+        "moneda":       "Sin definir",
+    }
+    for col, fallback in _FALLBACKS.items():
         df[col] = (
             df[col].fillna(fallback).astype(str).str.strip()
             .replace({"nan": fallback, "": fallback, "None": fallback, "NaT": fallback})
         )
+    # nombre_corto vacío → cuenta
+    mask_nc = df["nombre_corto"] == _FALLBACKS["nombre_corto"]
+    df.loc[mask_nc, "nombre_corto"] = df.loc[mask_nc, "cuenta"]
 
     mask_corte = df["fecha"].dt.date <= fecha_corte
     df_corte   = df[mask_corte].sort_values("fecha").reset_index(drop=True)
     df_post    = df[~mask_corte].sort_values("fecha").reset_index(drop=True)
 
     if df_corte.empty:
-        return _EMPTY, df_corte, df_post
+        return _EMPTY_SALDOS, df_corte, df_post
 
     results = []
-    for (banco, cuenta, moneda_g), grupo in df_corte.groupby(
-        ["banco", "cuenta", "moneda"], sort=True
+    for (empresa, banco, cuenta, nombre_corto, moneda_g), grupo in df_corte.groupby(
+        ["empresa", "banco", "cuenta", "nombre_corto", "moneda"], sort=True
     ):
         grupo = grupo.sort_values("fecha")
         last_row = grupo.iloc[-1]
 
-        # Saldo real: última fila con valor numérico en la columna saldo
         con_saldo = grupo.dropna(subset=["saldo"])
         if not con_saldo.empty:
             saldo_corte = float(con_saldo.iloc[-1]["saldo"])
@@ -110,12 +126,13 @@ def compute_saldos_corte(
             es_estimado = True
             observacion = "Saldo estimado por movimientos, validar contra extracto"
 
-        # Acceso seguro a columna "archivo" (sin .get() deprecado)
         archivo_val = str(last_row["archivo"]) if "archivo" in last_row.index else ""
 
         results.append({
+            "empresa":      str(empresa),
             "banco":        str(banco),
             "cuenta":       str(cuenta),
+            "nombre_corto": str(nombre_corto),
             "moneda":       str(moneda_g),
             "fecha_ult_mov": last_row["fecha"],
             "saldo_corte":  saldo_corte,
@@ -127,15 +144,14 @@ def compute_saldos_corte(
     return pd.DataFrame(results), df_corte, df_post
 
 
-# ─── Renderizado principal ────────────────────────────────────────────────
+# ─── Renderizado principal ────────────────────────────────────────────────────
 
 def render_balances(df, moneda: str = "Sin definir") -> None:
-    """Renderiza la pestaña completa de saldos por fecha de corte."""
+    """Renderiza la pestaña completa de disponibilidad bancaria."""
 
-    st.subheader("Saldos por fecha de corte")
-    st.caption("Versión: saldos corregido con moneda configurable")
+    st.subheader("Disponibilidad bancaria por fecha de corte")
+    st.caption("Versión: saldos por banco, cuenta y moneda")
 
-    # ── Guardia: df vacío ─────────────────────────────────────────────────
     if df is None or (hasattr(df, "empty") and df.empty):
         st.info(
             "Carga y procesa al menos un extracto para consultar saldos. "
@@ -143,24 +159,21 @@ def render_balances(df, moneda: str = "Sin definir") -> None:
         )
         return
 
-    # ── Todo el módulo envuelto en try/except para no romper la app ───────
     try:
-        _render_balances_body(df, moneda)
+        _render_balances_body(df)
     except Exception as exc:
         st.error(
             f"Error al calcular saldos: **{type(exc).__name__}: {exc}**\n\n"
             "Verifica que el archivo cargado tenga columnas de fecha e importe válidas."
         )
         with st.expander("Detalle técnico del error"):
-            import traceback
             st.code(traceback.format_exc())
 
 
-def _render_balances_body(df: pd.DataFrame, moneda: str) -> None:
-    """Lógica interna del módulo de saldos (separada para facilitar el manejo de errores)."""
+def _render_balances_body(df: pd.DataFrame) -> None:
+    """Lógica interna del módulo de disponibilidad."""
 
-    # Normalizar columnas antes de cualquier operación
-    df_work = _normalize_df(df, moneda)
+    df_work = _normalize_df(df)
     df_work["fecha"] = pd.to_datetime(df_work["fecha"], errors="coerce")
     df_work = df_work.dropna(subset=["fecha"])
 
@@ -182,8 +195,7 @@ def _render_balances_body(df: pd.DataFrame, moneda: str) -> None:
             value=fecha_max,
             min_value=fecha_min,
             max_value=fecha_max,
-            help="El sistema calculará el saldo de cada cuenta con el último "
-                 "movimiento igual o anterior a esta fecha.",
+            help="El sistema tomará el último saldo igual o anterior a esta fecha.",
             key="balances_fecha_corte",
         )
     with col_info:
@@ -195,7 +207,6 @@ def _render_balances_body(df: pd.DataFrame, moneda: str) -> None:
             unsafe_allow_html=True,
         )
 
-    # Streamlit puede devolver None o una tupla en edge cases
     if fecha_corte is None:
         st.warning("Selecciona una fecha de corte válida.")
         return
@@ -203,7 +214,7 @@ def _render_balances_body(df: pd.DataFrame, moneda: str) -> None:
         fecha_corte = fecha_corte[-1]
 
     # ── Calcular saldos ───────────────────────────────────────────────────
-    df_saldos, df_corte, df_post = compute_saldos_corte(df_work, fecha_corte, moneda)
+    df_saldos, df_corte, df_post = compute_saldos_corte(df_work, fecha_corte)
 
     if df_saldos.empty:
         st.warning(
@@ -215,91 +226,129 @@ def _render_balances_body(df: pd.DataFrame, moneda: str) -> None:
 
     # ── Filtros ───────────────────────────────────────────────────────────
     with st.expander("Filtros", expanded=False):
-        cf1, cf2, cf3 = st.columns(3)
+        cf1, cf2, cf3, cf4 = st.columns(4)
         with cf1:
+            empresas_opts = ["Todas"] + sorted(df_saldos["empresa"].unique().tolist())
+            f_empresa = st.selectbox("Empresa", empresas_opts, key="bal_empresa")
+        with cf2:
             bancos_opts = ["Todos"] + sorted(df_saldos["banco"].unique().tolist())
             f_banco = st.selectbox("Banco", bancos_opts, key="bal_banco")
-        with cf2:
+        with cf3:
             cuentas_opts = ["Todas"] + sorted(df_saldos["cuenta"].unique().tolist())
             f_cuenta = st.selectbox("Cuenta", cuentas_opts, key="bal_cuenta")
-        with cf3:
+        with cf4:
             monedas_opts = ["Todas"] + sorted(df_saldos["moneda"].unique().tolist())
             f_moneda = st.selectbox("Moneda", monedas_opts, key="bal_moneda")
 
     df_filtrado = df_saldos.copy()
-    if f_banco  != "Todos":  df_filtrado = df_filtrado[df_filtrado["banco"]  == f_banco]
-    if f_cuenta != "Todas":  df_filtrado = df_filtrado[df_filtrado["cuenta"] == f_cuenta]
-    if f_moneda != "Todas":  df_filtrado = df_filtrado[df_filtrado["moneda"] == f_moneda]
+    if f_empresa != "Todas":  df_filtrado = df_filtrado[df_filtrado["empresa"] == f_empresa]
+    if f_banco   != "Todos":  df_filtrado = df_filtrado[df_filtrado["banco"]   == f_banco]
+    if f_cuenta  != "Todas":  df_filtrado = df_filtrado[df_filtrado["cuenta"]  == f_cuenta]
+    if f_moneda  != "Todas":  df_filtrado = df_filtrado[df_filtrado["moneda"]  == f_moneda]
 
     # ── Métricas superiores ───────────────────────────────────────────────
     n_bancos    = int(df_filtrado["banco"].nunique())
     n_cuentas   = int(df_filtrado[["banco", "cuenta"]].drop_duplicates().shape[0])
     n_sin_saldo = int(df_filtrado["es_estimado"].sum())
 
-    def total_moneda(m: str) -> float:
+    def total_mon(m: str) -> float:
         s = df_filtrado[df_filtrado["moneda"] == m]["saldo_corte"]
         return float(s.sum()) if not s.empty else 0.0
 
     row1 = st.columns(3)
-    row1[0].metric("Bancos",   n_bancos)
-    row1[1].metric("Cuentas",  n_cuentas)
-    row1[2].metric(
-        "Sin saldo identificado", n_sin_saldo,
-        help="Cuentas cuyo saldo fue calculado por suma de importes "
-             "(no tenían columna Saldo en el extracto)."
-    )
+    row1[0].metric("Bancos",                  n_bancos)
+    row1[1].metric("Cuentas",                 n_cuentas)
+    row1[2].metric("Sin saldo identificado",  n_sin_saldo,
+                   help="Cuentas cuyo saldo fue estimado por suma de movimientos.")
 
     row2 = st.columns(3)
     for col_st, mon in zip(row2, ["BOB", "USD", "EUR"]):
-        col_st.metric(f"Saldo total {mon}", fmt_amount(total_moneda(mon), mon))
+        col_st.metric(f"Saldo total {mon}", fmt_amount(total_mon(mon), mon))
 
     st.divider()
 
-    # ── Tabla de saldos ───────────────────────────────────────────────────
-    st.markdown(
-        f"#### Saldos a la fecha de corte: {fecha_corte.strftime('%d/%m/%Y')}"
-    )
+    # ── Tabla: Saldos a la fecha de corte ────────────────────────────────
+    st.markdown(f"#### Saldos a la fecha de corte: {fecha_corte.strftime('%d/%m/%Y')}")
 
     display = df_filtrado.copy()
-    display["Fecha último movimiento"] = pd.to_datetime(
+    display["Fecha último mov."] = pd.to_datetime(
         display["fecha_ult_mov"], errors="coerce"
     ).dt.strftime("%d/%m/%Y")
-    display["Saldo a la fecha de corte"] = display.apply(
+    display["Saldo a la fecha"] = display.apply(
         lambda r: fmt_amount(r["saldo_corte"], r["moneda"]), axis=1
     )
     display = display.rename(columns={
-        "banco":       "Banco",
-        "cuenta":      "Cuenta",
-        "moneda":      "Moneda",
-        "archivo":     "Archivo origen",
-        "observacion": "Observaciones",
+        "empresa":      "Empresa",
+        "banco":        "Banco",
+        "cuenta":       "Cuenta",
+        "nombre_corto": "Nombre corto",
+        "moneda":       "Moneda",
+        "archivo":      "Archivo origen",
+        "observacion":  "Observaciones",
     })
-    display = display[[
-        "Banco", "Cuenta", "Moneda",
-        "Fecha último movimiento",
-        "Saldo a la fecha de corte",
-        "Archivo origen",
-        "Observaciones",
-    ]]
+    cols_tabla = [c for c in [
+        "Empresa", "Banco", "Cuenta", "Nombre corto", "Moneda",
+        "Fecha último mov.", "Saldo a la fecha", "Archivo origen", "Observaciones",
+    ] if c in display.columns]
 
-    def _style_row(row):
+    def _style_estimado(row):
         if "estimado" in str(row.get("Observaciones", "")).lower():
             return ["background-color: #fff8e1"] * len(row)
         return [""] * len(row)
 
     try:
-        styled = display.style.apply(_style_row, axis=1)
+        styled = display[cols_tabla].style.apply(_style_estimado, axis=1)
         st.dataframe(styled, use_container_width=True, hide_index=True)
     except Exception:
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.dataframe(display[cols_tabla], use_container_width=True, hide_index=True)
 
     st.caption(
-        "Filas en amarillo = saldo estimado por suma de importes "
+        "Filas en amarillo = saldo estimado por suma de movimientos "
         "(el extracto no tiene columna Saldo)."
     )
 
-    # ── Movimientos posteriores ───────────────────────────────────────────
     st.divider()
+
+    # ── Vista matriz por cuenta ────────────────────────────────────────────
+    st.markdown("#### Vista matriz por cuenta")
+    st.caption("Saldo disponible por empresa/banco/cuenta y moneda.")
+
+    try:
+        pivot = df_filtrado.pivot_table(
+            index=["empresa", "banco", "cuenta", "nombre_corto"],
+            columns="moneda",
+            values="saldo_corte",
+            aggfunc="sum",
+        ).reset_index()
+        pivot.columns.name = None
+
+        for mon in ["BOB", "USD", "EUR"]:
+            if mon not in pivot.columns:
+                pivot[mon] = float("nan")
+
+        pivot = pivot.rename(columns={
+            "empresa":      "Empresa",
+            "banco":        "Banco",
+            "cuenta":       "Cuenta",
+            "nombre_corto": "Nombre corto",
+            "BOB": "Saldo BOB (Bs)",
+            "USD": "Saldo USD",
+            "EUR": "Saldo EUR",
+        })
+
+        num_cols = {
+            c: st.column_config.NumberColumn(c, format="%.2f")
+            for c in ["Saldo BOB (Bs)", "Saldo USD", "Saldo EUR"]
+            if c in pivot.columns
+        }
+        st.dataframe(pivot, use_container_width=True, hide_index=True,
+                     column_config=num_cols)
+    except Exception as exc:
+        st.warning(f"No se pudo generar la vista matriz: {exc}")
+
+    st.divider()
+
+    # ── Movimientos posteriores agrupados ─────────────────────────────────
     label_post = (
         f"Movimientos posteriores al {fecha_corte.strftime('%d/%m/%Y')} "
         f"({len(df_post):,} movimientos)"
@@ -308,123 +357,186 @@ def _render_balances_body(df: pd.DataFrame, moneda: str) -> None:
         if df_post.empty:
             st.info("No hay movimientos posteriores a la fecha de corte.")
         else:
-            cols_post = [c for c in ["fecha", "descripcion", "importe", "banco", "cuenta", "moneda"]
-                        if c in df_post.columns]
-            post_display = df_post[cols_post].copy()
-            if "fecha" in post_display.columns:
-                post_display["fecha"] = pd.to_datetime(
-                    post_display["fecha"], errors="coerce"
-                ).dt.strftime("%d/%m/%Y")
-            if "importe" in post_display.columns:
-                post_display["importe"] = pd.to_numeric(post_display["importe"], errors="coerce")
-
-            total_post = float(pd.to_numeric(df_post.get("importe", pd.Series(dtype=float)), errors="coerce").sum())
-            st.markdown(
-                f"**{len(df_post):,} movimientos** posteriores. "
-                f"Suma neta: **{fmt_amount(total_post, moneda)}**"
-            )
-            st.dataframe(
-                post_display.rename(columns={
-                    "fecha": "Fecha", "descripcion": "Descripción",
-                    "importe": "Importe", "banco": "Banco",
-                    "cuenta": "Cuenta", "moneda": "Moneda",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
+            grupos_post = df_post.groupby(["empresa", "banco", "cuenta", "moneda"])
+            for (emp, ban, cta, mon), grp in grupos_post:
+                imp_num = pd.to_numeric(grp["importe"], errors="coerce")
+                neto = float(imp_num.sum())
+                st.markdown(
+                    f"**{emp}** | {ban} | {cta} | {mon} — "
+                    f"{len(grp):,} mov. | Neto: **{fmt_amount(neto, mon)}**"
+                )
+                show_cols = [c for c in [
+                    "fecha", "descripcion", "referencia", "debito", "credito", "importe",
+                ] if c in grp.columns]
+                g = grp[show_cols].copy()
+                if "fecha" in g.columns:
+                    g["fecha"] = pd.to_datetime(g["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
+                st.dataframe(
+                    g.rename(columns={
+                        "fecha": "Fecha", "descripcion": "Descripción",
+                        "referencia": "Ref.", "debito": "Débito",
+                        "credito": "Crédito", "importe": "Importe",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+                st.markdown("---")
 
     # ── Exportar Excel ────────────────────────────────────────────────────
     st.divider()
-    st.markdown("#### Exportar reporte de saldos")
+    st.markdown("#### Exportar reporte de disponibilidad")
     st.write(
-        "Genera un Excel con 4 hojas: **Saldos a fecha corte**, "
+        "Genera un Excel con 6 hojas: **Resumen disponibilidad**, "
+        "**Saldos a fecha de corte**, **Vista matriz por cuenta**, "
         "**Movimientos considerados**, **Movimientos posteriores** y "
-        "**Sin saldo identificado**."
+        "**Cuentas sin saldo identificado**."
     )
 
-    df_sin_saldo_exp = df_filtrado[df_filtrado["es_estimado"]].copy()
+    n_bancos_exp    = int(df_filtrado["banco"].nunique())
+    n_cuentas_exp   = int(df_filtrado[["banco", "cuenta"]].drop_duplicates().shape[0])
+    n_sin_saldo_exp = int(df_filtrado["es_estimado"].sum())
 
     try:
         excel_bytes = _export_saldos_excel(
-            df_saldos=df_filtrado,
-            df_movs_corte=df_corte,
-            df_movs_post=df_post,
-            df_sin_saldo=df_sin_saldo_exp,
-            fecha_corte=fecha_corte,
+            df_saldos     = df_filtrado,
+            df_movs_corte = df_corte,
+            df_movs_post  = df_post,
+            fecha_corte   = fecha_corte,
+            totales       = {
+                "BOB": total_mon("BOB"),
+                "USD": total_mon("USD"),
+                "EUR": total_mon("EUR"),
+            },
+            estadisticas  = {
+                "n_bancos":    n_bancos_exp,
+                "n_cuentas":   n_cuentas_exp,
+                "n_sin_saldo": n_sin_saldo_exp,
+            },
         )
         st.download_button(
-            label="Descargar reporte de saldos (Excel)",
+            label="Descargar reporte de disponibilidad (Excel)",
             data=excel_bytes,
-            file_name=f"saldos_{fecha_corte.strftime('%Y%m%d')}.xlsx",
+            file_name=f"disponibilidad_{fecha_corte.strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     except Exception as exc:
         st.warning(f"No se pudo generar el Excel: {exc}")
 
 
-# ─── Exportación Excel ────────────────────────────────────────────────────
+# ─── Exportación Excel ────────────────────────────────────────────────────────
 
 def _export_saldos_excel(
     df_saldos: pd.DataFrame,
     df_movs_corte: pd.DataFrame,
     df_movs_post: pd.DataFrame,
-    df_sin_saldo: pd.DataFrame,
     fecha_corte: datetime.date,
+    totales: dict,
+    estadisticas: dict,
 ) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
 
-        # Hoja 1 — Saldos
-        hoja1 = df_saldos.copy()
-        if "fecha_ult_mov" in hoja1.columns:
-            hoja1["fecha_ult_mov"] = pd.to_datetime(
-                hoja1["fecha_ult_mov"], errors="coerce"
-            ).dt.strftime("%d/%m/%Y")
-        hoja1 = hoja1.rename(columns={
-            "banco": "Banco", "cuenta": "Cuenta", "moneda": "Moneda",
-            "fecha_ult_mov": "Fecha último movimiento",
-            "saldo_corte": "Saldo a la fecha de corte",
-            "es_estimado": "Es estimado",
-            "archivo": "Archivo origen", "observacion": "Observaciones",
-        })
-        hoja1.to_excel(writer, index=False, sheet_name="Saldos a fecha corte")
+        # ── Hoja 1: Resumen disponibilidad ────────────────────────────────
+        resumen = pd.DataFrame([{
+            "Fecha de corte":                  fecha_corte.strftime("%d/%m/%Y"),
+            "Saldo total BOB (Bs)":            totales.get("BOB", 0.0),
+            "Saldo total USD":                 totales.get("USD", 0.0),
+            "Saldo total EUR":                 totales.get("EUR", 0.0),
+            "Cantidad de bancos":              estadisticas.get("n_bancos", 0),
+            "Cantidad de cuentas":             estadisticas.get("n_cuentas", 0),
+            "Cuentas sin saldo identificado":  estadisticas.get("n_sin_saldo", 0),
+        }])
+        resumen.to_excel(writer, index=False, sheet_name="Resumen disponibilidad")
 
-        # Hoja 2 — Movimientos considerados
+        # ── Hoja 2: Saldos a fecha de corte ──────────────────────────────
+        hoja2 = df_saldos.copy()
+        if "fecha_ult_mov" in hoja2.columns:
+            hoja2["fecha_ult_mov"] = pd.to_datetime(
+                hoja2["fecha_ult_mov"], errors="coerce"
+            ).dt.strftime("%d/%m/%Y")
+        hoja2 = hoja2.rename(columns={
+            "empresa":      "Empresa",
+            "banco":        "Banco",
+            "cuenta":       "Cuenta",
+            "nombre_corto": "Nombre corto",
+            "moneda":       "Moneda",
+            "fecha_ult_mov": "Fecha último movimiento",
+            "saldo_corte":  "Saldo a la fecha de corte",
+            "es_estimado":  "Es estimado",
+            "archivo":      "Archivo origen",
+            "observacion":  "Observaciones",
+        })
+        hoja2.to_excel(writer, index=False, sheet_name="Saldos a fecha de corte")
+
+        # ── Hoja 3: Vista matriz por cuenta ──────────────────────────────
+        try:
+            pivot = df_saldos.pivot_table(
+                index=["empresa", "banco", "cuenta", "nombre_corto"],
+                columns="moneda",
+                values="saldo_corte",
+                aggfunc="sum",
+            ).reset_index()
+            pivot.columns.name = None
+            for mon in ["BOB", "USD", "EUR"]:
+                if mon not in pivot.columns:
+                    pivot[mon] = float("nan")
+            pivot = pivot.rename(columns={
+                "empresa": "Empresa", "banco": "Banco",
+                "cuenta": "Cuenta", "nombre_corto": "Nombre corto",
+                "BOB": "Saldo BOB (Bs)", "USD": "Saldo USD", "EUR": "Saldo EUR",
+            })
+            pivot.to_excel(writer, index=False, sheet_name="Vista matriz por cuenta")
+        except Exception:
+            pd.DataFrame().to_excel(writer, index=False, sheet_name="Vista matriz por cuenta")
+
+        # ── Hoja 4: Movimientos considerados ─────────────────────────────
         _prep_movs_for_excel(df_movs_corte).to_excel(
             writer, index=False, sheet_name="Movimientos considerados"
         )
 
-        # Hoja 3 — Movimientos posteriores
+        # ── Hoja 5: Movimientos posteriores ──────────────────────────────
         _prep_movs_for_excel(df_movs_post).to_excel(
             writer, index=False, sheet_name="Movimientos posteriores"
         )
 
-        # Hoja 4 — Sin saldo identificado
-        if df_sin_saldo.empty:
-            hoja4 = pd.DataFrame(columns=["Banco", "Cuenta", "Moneda", "Saldo estimado", "Observaciones"])
+        # ── Hoja 6: Cuentas sin saldo identificado ────────────────────────
+        df_sin = df_saldos[df_saldos["es_estimado"]].copy()
+        if df_sin.empty:
+            hoja6 = pd.DataFrame(columns=[
+                "Empresa", "Banco", "Cuenta", "Nombre corto",
+                "Moneda", "Saldo estimado", "Observaciones",
+            ])
         else:
-            cols_h4 = [c for c in ["banco", "cuenta", "moneda", "saldo_corte", "observacion"] if c in df_sin_saldo.columns]
-            hoja4 = df_sin_saldo[cols_h4].copy().rename(columns={
-                "banco": "Banco", "cuenta": "Cuenta", "moneda": "Moneda",
+            cols_h6 = [c for c in [
+                "empresa", "banco", "cuenta", "nombre_corto",
+                "moneda", "saldo_corte", "observacion",
+            ] if c in df_sin.columns]
+            hoja6 = df_sin[cols_h6].rename(columns={
+                "empresa": "Empresa", "banco": "Banco", "cuenta": "Cuenta",
+                "nombre_corto": "Nombre corto", "moneda": "Moneda",
                 "saldo_corte": "Saldo estimado", "observacion": "Observaciones",
             })
-        hoja4.to_excel(writer, index=False, sheet_name="Sin saldo identificado")
+        hoja6.to_excel(writer, index=False, sheet_name="Cuentas sin saldo")
 
     return buf.getvalue()
 
 
 def _prep_movs_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepara un DataFrame de movimientos para exportar a Excel."""
     if df is None or df.empty:
-        return pd.DataFrame(columns=["Fecha", "Descripción", "Importe", "Saldo",
-                                     "Banco", "Cuenta", "Moneda", "Archivo"])
+        return pd.DataFrame(columns=[
+            "Empresa", "Banco", "Cuenta", "Nombre corto", "Moneda",
+            "Fecha", "Descripción", "Referencia", "Débito", "Crédito",
+            "Importe", "Saldo", "Archivo",
+        ])
     out = df.copy()
     if "fecha" in out.columns:
         out["fecha"] = pd.to_datetime(out["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
     rename = {
-        "fecha": "Fecha", "descripcion": "Descripción",
-        "importe": "Importe", "saldo": "Saldo",
-        "banco": "Banco", "cuenta": "Cuenta",
-        "moneda": "Moneda", "archivo": "Archivo",
+        "empresa": "Empresa", "banco": "Banco", "cuenta": "Cuenta",
+        "nombre_corto": "Nombre corto", "moneda": "Moneda",
+        "fecha": "Fecha", "descripcion": "Descripción", "referencia": "Referencia",
+        "debito": "Débito", "credito": "Crédito",
+        "importe": "Importe", "saldo": "Saldo", "archivo": "Archivo",
     }
     out = out.rename(columns={k: v for k, v in rename.items() if k in out.columns})
     keep = [v for v in rename.values() if v in out.columns]

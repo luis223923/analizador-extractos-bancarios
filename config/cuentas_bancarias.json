@@ -1,0 +1,42 @@
+[
+  {
+    "empresa": "Empresa Ejemplo S.A.",
+    "banco": "Banco Nacional de Bolivia (BNB)",
+    "numero_cuenta": "1000123456",
+    "nombre_corto": "BNB Cte BOB",
+    "moneda": "BOB",
+    "tipo_cuenta": "Corriente",
+    "estado": "Activa",
+    "observaciones": ""
+  },
+  {
+    "empresa": "Empresa Ejemplo S.A.",
+    "banco": "BBVA Bolivia",
+    "numero_cuenta": "2000654321",
+    "nombre_corto": "BBVA Ahorro USD",
+    "moneda": "USD",
+    "tipo_cuenta": "Ahorro",
+    "estado": "Activa",
+    "observaciones": ""
+  },
+  {
+    "empresa": "Empresa Ejemplo S.A.",
+    "banco": "Banco BISA S.A.",
+    "numero_cuenta": "3000987654",
+    "nombre_corto": "BISA Cte BOB",
+    "moneda": "BOB",
+    "tipo_cuenta": "Corriente",
+    "estado": "Activa",
+    "observaciones": ""
+  },
+  {
+    "empresa": "Empresa Ejemplo S.A.",
+    "banco": "Banco Mercantil Santa Cruz (BME)",
+    "numero_cuenta": "4000111222",
+    "nombre_corto": "BME Ahorro USD",
+    "moneda": "USD",
+    "tipo_cuenta": "Ahorro",
+    "estado": "Activa",
+    "observaciones": ""
+  }
+]

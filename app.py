@@ -3,19 +3,21 @@ Analizador de Extractos Bancarios para Tesorería
 Punto de entrada principal de la aplicación Streamlit.
 """
 
+import re
 import streamlit as st
 import pandas as pd
 
 from core.loader import load_file, reload_excel
 from core.normalizer import normalize, normalize_with_mapping, diagnose, get_registered_banks
-from core.schema import empty_standard_df, MONEDAS
+from core.schema import empty_standard_df, MONEDAS, TIPOS_CUENTA
+from core.accounts import load_accounts
 from modules.preview import render_preview
 from modules.classifier import render_classifier
 from modules.balances import render_balances
 from modules.duplicates import render_duplicates
 from modules.exporter import render_exporter
 
-# ─── Configuración de página ─────────────────────────────────────────────
+# ─── Configuración de página ─────────────────────────────────────────────────
 st.set_page_config(
     page_title="Analizador de Extractos Bancarios",
     page_icon="🏦",
@@ -23,21 +25,129 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── Estado global de sesión ─────────────────────────────────────────────
+# ─── Estado global de sesión ─────────────────────────────────────────────────
 if "df_consolidado" not in st.session_state:
     st.session_state.df_consolidado = empty_standard_df()
 
 if "archivos_cargados" not in st.session_state:
-    st.session_state.archivos_cargados = []   # [(filename, parser_name, n_rows)]
+    st.session_state.archivos_cargados = []
 
 if "cola_mapeo" not in st.session_state:
     st.session_state.cola_mapeo = []
 
-if "moneda_seleccionada" not in st.session_state:
-    st.session_state.moneda_seleccionada = "BOB"
+
+# ─── Helpers de metadatos ─────────────────────────────────────────────────────
+
+def _safe_key(filename: str, size: int) -> str:
+    """Convierte nombre+tamaño en una clave segura para widgets de Streamlit."""
+    return re.sub(r"[^a-zA-Z0-9]", "_", f"{filename}_{size}")
 
 
-# ─── Funciones de renderizado ─────────────────────────────────────────────
+def _get_file_metadata(filename: str, size: int, cuentas: list) -> dict:
+    """Lee los valores actuales de los widgets de metadatos desde session_state."""
+    safe = _safe_key(filename, size)
+    master_key = f"meta_{safe}_master"
+    master_sel = st.session_state.get(master_key, "Manual")
+    nombres = ["Manual"] + [c.get("nombre_corto", "") for c in cuentas]
+    master_idx = nombres.index(master_sel) if master_sel in nombres else 0
+    prefix = f"meta_{safe}_idx{master_idx}"
+    return {
+        "empresa":       st.session_state.get(f"{prefix}_empresa", ""),
+        "banco":         st.session_state.get(f"{prefix}_banco", ""),
+        "cuenta":        st.session_state.get(f"{prefix}_cuenta", ""),
+        "nombre_corto":  st.session_state.get(f"{prefix}_nombre_corto", ""),
+        "moneda":        st.session_state.get(f"{prefix}_moneda", "BOB"),
+        "tipo_cuenta":   st.session_state.get(f"{prefix}_tipo_cuenta", "Sin definir"),
+        "observaciones": st.session_state.get(f"{prefix}_observaciones", ""),
+    }
+
+
+def _render_file_metadata_form(f, cuentas: list) -> None:
+    """Renderiza el formulario de metadatos para un archivo en el panel lateral."""
+    safe = _safe_key(f.name, f.size)
+    master_key = f"meta_{safe}_master"
+    nombres_maestro = ["Manual"] + [c.get("nombre_corto", "") for c in cuentas]
+
+    master_sel = st.selectbox(
+        "Cuenta del maestro",
+        nombres_maestro,
+        key=master_key,
+        help="Selecciona una cuenta registrada para pre-rellenar los campos",
+        label_visibility="collapsed",
+    )
+
+    cuenta_data = next((c for c in cuentas if c.get("nombre_corto") == master_sel), None)
+
+    def dv(campo, fallback=""):
+        return cuenta_data.get(campo, fallback) if cuenta_data else fallback
+
+    master_idx = nombres_maestro.index(master_sel) if master_sel in nombres_maestro else 0
+    prefix = f"meta_{safe}_idx{master_idx}"
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.text_input("Empresa", value=dv("empresa"), key=f"{prefix}_empresa",
+                      placeholder="Mi Empresa S.A.")
+        st.text_input("N° Cuenta", value=dv("numero_cuenta"), key=f"{prefix}_cuenta",
+                      placeholder="000000000")
+        mon_def = dv("moneda", "BOB")
+        mon_idx = MONEDAS.index(mon_def) if mon_def in MONEDAS else 0
+        st.selectbox("Moneda", MONEDAS, index=mon_idx, key=f"{prefix}_moneda")
+    with c2:
+        st.text_input("Banco", value=dv("banco"), key=f"{prefix}_banco",
+                      placeholder="Nombre del banco")
+        st.text_input("Nombre corto", value=dv("nombre_corto"), key=f"{prefix}_nombre_corto",
+                      placeholder="BNB Cte BOB")
+        tipo_def = dv("tipo_cuenta", "Sin definir")
+        tipo_idx = TIPOS_CUENTA.index(tipo_def) if tipo_def in TIPOS_CUENTA else 0
+        st.selectbox("Tipo cuenta", TIPOS_CUENTA, index=tipo_idx, key=f"{prefix}_tipo_cuenta")
+
+    st.text_input("Observaciones", value=dv("observaciones"),
+                  key=f"{prefix}_observaciones", placeholder="Opcional")
+
+
+def _apply_metadata_to_df(
+    df_std: pd.DataFrame,
+    meta: dict,
+    selected_sheet: str = "",
+    header_row: int = 0,
+    is_excel: bool = False,
+) -> pd.DataFrame:
+    """
+    Enriquece el DataFrame normalizado con los metadatos del usuario:
+    empresa, nombre_corto, moneda, tipo_cuenta, hoja_origen, fila_origen,
+    observaciones, y deriva debito/credito desde importe.
+    """
+    df = df_std.copy()
+
+    df["empresa"] = meta.get("empresa") or "Sin identificar"
+
+    if meta.get("banco"):
+        df["banco"] = meta["banco"]
+    if meta.get("cuenta"):
+        df["cuenta"] = meta["cuenta"]
+
+    nc = meta.get("nombre_corto") or meta.get("cuenta") or ""
+    if not nc and not df.empty and "cuenta" in df.columns:
+        nc = str(df["cuenta"].iloc[0])
+    df["nombre_corto"] = nc or "Sin nombre"
+
+    df["moneda"]        = meta.get("moneda") or "BOB"
+    df["tipo_cuenta"]   = meta.get("tipo_cuenta") or "Sin definir"
+    df["observaciones"] = meta.get("observaciones") or ""
+    df["hoja_origen"]   = selected_sheet or ""
+
+    fila_base = (header_row + 2) if is_excel else 2
+    df["fila_origen"] = [str(fila_base + i) for i in range(len(df))]
+
+    imp = pd.to_numeric(df["importe"], errors="coerce").fillna(0.0)
+    df["debito"]  = (-imp).clip(lower=0.0)
+    df["credito"] = imp.clip(lower=0.0)
+
+    return df
+
+
+# ─── Funciones de renderizado ─────────────────────────────────────────────────
 
 def render_welcome():
     st.markdown(
@@ -48,8 +158,8 @@ def render_welcome():
         analiza movimientos y prepara informes de Tesorería, **sin instalar nada**.
 
         **Cómo empezar:**
-        1. Selecciona la **moneda** del extracto en el panel lateral.
-        2. Sube uno o varios archivos Excel o CSV.
+        1. Sube uno o varios archivos Excel o CSV en el panel lateral.
+        2. Completa los **datos del extracto** (empresa, banco, cuenta, moneda).
         3. Pulsa **Procesar archivos**.
         4. Si el sistema reconoce el formato → los datos aparecen de inmediato.
         5. Si no lo reconoce → verás una pantalla de mapeo para asignar columnas.
@@ -76,18 +186,18 @@ def render_welcome():
         )
 
 
-def render_main_tabs(df: pd.DataFrame, moneda: str):
+def render_main_tabs(df: pd.DataFrame):
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Vista previa", "Clasificación", "Saldos", "Duplicados", "Exportar",
     ])
-    with tab1: render_preview(df, moneda)
+    with tab1: render_preview(df)
     with tab2: render_classifier(df)
-    with tab3: render_balances(df, moneda)
+    with tab3: render_balances(df)
     with tab4: render_duplicates(df)
-    with tab5: render_exporter(df, moneda)
+    with tab5: render_exporter(df)
 
 
-def render_mapping_ui(pending: dict, moneda: str):
+def render_mapping_ui(pending: dict):
     """
     Pantalla de mapeo manual para un archivo que no se pudo parsear automáticamente.
     """
@@ -97,6 +207,7 @@ def render_mapping_ui(pending: dict, moneda: str):
     sheets    = pending["sheets"]
     diag      = pending["diagnostic"]
     df_raw    = pending["df_raw"]
+    meta      = pending.get("metadata", {})
     total_pendientes = len(st.session_state.cola_mapeo)
 
     st.subheader("Mapeo manual de columnas")
@@ -107,14 +218,19 @@ def render_mapping_ui(pending: dict, moneda: str):
     if total_pendientes > 1:
         st.caption(f"Archivo 1 de {total_pendientes} pendientes de mapeo.")
 
-    # ── Ajuste de hoja y fila de encabezado (solo Excel) ──────────────────
+    if any(meta.get(k) for k in ["empresa", "banco", "cuenta"]):
+        st.info(
+            f"Datos del extracto: **{meta.get('empresa', '')}** | "
+            f"{meta.get('banco', '')} | {meta.get('cuenta', '')} | "
+            f"{meta.get('moneda', 'BOB')}"
+        )
+
     if ext in ("xlsx", "xls") and sheets:
         st.markdown("#### Ajustar lectura del archivo")
         col_s, col_h, col_btn = st.columns([3, 2, 2])
         with col_s:
             sheet_sel = st.selectbox(
-                "Hoja del Excel",
-                sheets,
+                "Hoja del Excel", sheets,
                 index=sheets.index(pending["selected_sheet"])
                       if pending["selected_sheet"] in sheets else 0,
                 key="mapeo_sheet",
@@ -124,8 +240,7 @@ def render_mapping_ui(pending: dict, moneda: str):
                 "Fila de encabezado (0 = primera fila)",
                 min_value=0, max_value=50,
                 value=int(pending["header_row"]),
-                step=1,
-                key="mapeo_header",
+                step=1, key="mapeo_header",
             )
         with col_btn:
             st.markdown("<br>", unsafe_allow_html=True)
@@ -141,7 +256,6 @@ def render_mapping_ui(pending: dict, moneda: str):
                 except Exception as e:
                     st.error(f"Error al recargar: {e}")
 
-    # ── Panel de diagnóstico ──────────────────────────────────────────────
     labels_campo = {
         "fecha": "Fecha", "descripcion": "Descripción",
         "debito": "Débito", "credito": "Crédito",
@@ -165,11 +279,9 @@ def render_mapping_ui(pending: dict, moneda: str):
                     st.markdown(f"&nbsp;&nbsp;✗ {labels_campo.get(k, k)}")
             else:
                 st.success("Todas las columnas fueron detectadas.")
-
         st.write("**Primeras 10 filas del archivo:**")
         st.dataframe(diag["muestra"], use_container_width=True, hide_index=True)
 
-    # ── Selectores de mapeo ───────────────────────────────────────────────
     st.markdown("#### Asigna las columnas")
     st.info(
         "Selecciona qué columna del archivo corresponde a cada campo. "
@@ -179,7 +291,7 @@ def render_mapping_ui(pending: dict, moneda: str):
     )
 
     detected = diag["columnas_detectadas"]
-    opciones = ["(no usar)"] + list(df_raw.columns)
+    opciones  = ["(no usar)"] + list(df_raw.columns)
 
     def default_idx(campo: str) -> int:
         col = detected.get(campo)
@@ -188,17 +300,17 @@ def render_mapping_ui(pending: dict, moneda: str):
     col_l, col_r = st.columns(2)
     with col_l:
         st.markdown("**Campos de identificación**")
-        c_fecha = st.selectbox("Fecha *",              opciones, index=default_idx("fecha"),       key="map_fecha")
+        c_fecha = st.selectbox("Fecha *",                    opciones, index=default_idx("fecha"),       key="map_fecha")
         c_desc  = st.selectbox("Descripción / Glosa",  opciones, index=default_idx("descripcion"), key="map_desc")
-        c_saldo = st.selectbox("Saldo",                opciones, index=default_idx("saldo"),       key="map_saldo")
-        c_ref   = st.selectbox("Referencia / Folio",   opciones, index=default_idx("referencia"),  key="map_ref")
+        c_saldo = st.selectbox("Saldo",                      opciones, index=default_idx("saldo"),       key="map_saldo")
+        c_ref   = st.selectbox("Referencia / Folio",         opciones, index=default_idx("referencia"),  key="map_ref")
     with col_r:
         st.markdown("**Importe — elige A o B (no ambas)**")
         st.markdown("*Opción A: columna única con signo*")
-        c_imp   = st.selectbox("Importe (con signo)",        opciones, index=default_idx("importe"), key="map_imp")
+        c_imp  = st.selectbox("Importe (con signo)",             opciones, index=default_idx("importe"), key="map_imp")
         st.markdown("*Opción B: columnas separadas*")
-        c_deb   = st.selectbox("Débito / Cargo / Egreso",   opciones, index=default_idx("debito"),  key="map_deb")
-        c_cred  = st.selectbox("Crédito / Abono / Ingreso", opciones, index=default_idx("credito"), key="map_cred")
+        c_deb  = st.selectbox("Débito / Cargo / Egreso",   opciones, index=default_idx("debito"),  key="map_deb")
+        c_cred = st.selectbox("Crédito / Abono / Ingreso", opciones, index=default_idx("credito"), key="map_cred")
 
     st.divider()
 
@@ -219,7 +331,12 @@ def render_mapping_ui(pending: dict, moneda: str):
             }
             try:
                 df_std, parser_name = normalize_with_mapping(df_raw, mapping, filename)
-                df_std["moneda"] = moneda
+                df_std = _apply_metadata_to_df(
+                    df_std, meta,
+                    selected_sheet=pending.get("selected_sheet", ""),
+                    header_row=pending.get("header_row", 0),
+                    is_excel=pending.get("ext", "") in ("xlsx", "xls"),
+                )
                 st.session_state.df_consolidado = pd.concat(
                     [st.session_state.df_consolidado, df_std],
                     ignore_index=True,
@@ -246,27 +363,12 @@ def render_mapping_ui(pending: dict, moneda: str):
         )
 
 
-# ─── Barra lateral ────────────────────────────────────────────────────────
+# ─── Barra lateral ────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🏦 Extractos Bancarios")
+    st.title("\U0001f3e6 Extractos Bancarios")
     st.caption("Herramienta de Tesorería")
     st.divider()
 
-    # ── Selector de moneda ────────────────────────────────────────────────
-    st.subheader("Moneda del extracto")
-    moneda_sel = st.selectbox(
-        "Selecciona la moneda",
-        MONEDAS,
-        index=MONEDAS.index(st.session_state.moneda_seleccionada),
-        key="sidebar_moneda",
-        label_visibility="collapsed",
-    )
-    st.session_state.moneda_seleccionada = moneda_sel
-    st.caption(f"Moneda seleccionada: **{moneda_sel}**")
-
-    st.divider()
-
-    # ── Carga de archivos ─────────────────────────────────────────────────
     st.subheader("Cargar extractos")
     uploaded_files = st.file_uploader(
         "Selecciona archivos",
@@ -276,8 +378,22 @@ with st.sidebar:
     )
 
     if uploaded_files:
+        cuentas = load_accounts()
+        st.markdown("---")
+        st.markdown("**Datos de los extractos**")
+        if cuentas:
+            st.caption("Carga desde el maestro o completa manualmente.")
+        else:
+            st.caption("Completa los datos de cada archivo antes de procesar.")
+
+        for f in uploaded_files:
+            with st.expander(f"\U0001f4c4 {f.name}", expanded=True):
+                if cuentas:
+                    st.caption("Maestro de cuentas:")
+                _render_file_metadata_form(f, cuentas)
+
+        st.markdown("---")
         if st.button("Procesar archivos", type="primary", use_container_width=True):
-            moneda_actual = st.session_state.moneda_seleccionada
             nuevos_frames = []
             errores = []
             necesitan_mapeo = 0
@@ -289,12 +405,18 @@ with st.sidebar:
                     text=f"Procesando {f.name}…",
                 )
                 try:
+                    meta = _get_file_metadata(f.name, f.size, cuentas)
                     info = load_file(f)
                     resultado = normalize(info.df_raw, info.filename)
 
                     if resultado is not None:
                         df_std, parser_name = resultado
-                        df_std["moneda"] = moneda_actual   # asignar moneda
+                        df_std = _apply_metadata_to_df(
+                            df_std, meta,
+                            selected_sheet=info.selected_sheet,
+                            header_row=info.header_row,
+                            is_excel=info.ext in ("xlsx", "xls"),
+                        )
                         nuevos_frames.append(df_std)
                         st.session_state.archivos_cargados.append(
                             (info.filename, parser_name, len(df_std))
@@ -310,6 +432,7 @@ with st.sidebar:
                             "header_row":     info.header_row,
                             "df_raw":         info.df_raw,
                             "diagnostic":     diag,
+                            "metadata":       meta,
                         })
                         necesitan_mapeo += 1
 
@@ -361,19 +484,31 @@ with st.sidebar:
             "fecha e importe con nombres variados."
         )
 
+    with st.expander("Maestro de cuentas bancarias"):
+        cuentas_disp = load_accounts()
+        if cuentas_disp:
+            for c in cuentas_disp:
+                st.markdown(
+                    f"- **{c.get('nombre_corto', '')}** — "
+                    f"{c.get('banco', '')} | {c.get('moneda', '')} | "
+                    f"{c.get('tipo_cuenta', '')}"
+                )
+            st.caption("Edita `config/cuentas_bancarias.json` para agregar cuentas.")
+        else:
+            st.caption("No hay cuentas registradas. Edita `config/cuentas_bancarias.json`.")
 
-# ─── Área principal ───────────────────────────────────────────────────────
+
+# ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: módulo de saldos por fecha implementado")
+st.caption("Versión: saldos por banco, cuenta y moneda")
 st.divider()
 
-moneda = st.session_state.moneda_seleccionada
-cola   = st.session_state.cola_mapeo
-df     = st.session_state.df_consolidado
+cola = st.session_state.cola_mapeo
+df   = st.session_state.df_consolidado
 
 if cola:
-    render_mapping_ui(cola[0], moneda)
+    render_mapping_ui(cola[0])
 elif not df.empty:
-    render_main_tabs(df, moneda)
+    render_main_tabs(df)
 else:
     render_welcome()

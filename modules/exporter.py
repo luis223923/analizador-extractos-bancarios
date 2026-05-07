@@ -1,13 +1,13 @@
 """
 Módulo de exportación a Excel con formato de Tesorería.
-Incluye columna Moneda y encabezados dinámicos según la moneda seleccionada.
+Incluye todas las columnas del esquema extendido:
+empresa, banco, cuenta, nombre_corto, moneda, tipo_cuenta,
+debito, credito, importe, saldo, hoja_origen, fila_origen, observaciones.
 """
 
 import io
 import pandas as pd
 import streamlit as st
-
-from core.schema import fmt_amount
 
 
 def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
@@ -25,42 +25,46 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
     with col2:
         include_ref = st.checkbox("Incluir referencia", value=True)
 
-    # Columnas base — moneda siempre incluida
-    cols = ["fecha", "descripcion", "importe"]
-    if include_saldo:
-        cols.append("saldo")
+    # Orden de columnas para la exportación
+    cols = [
+        "empresa", "banco", "cuenta", "nombre_corto", "moneda", "tipo_cuenta",
+        "fecha", "descripcion",
+    ]
     if include_ref:
         cols.append("referencia")
-    cols += ["banco", "cuenta", "moneda", "archivo"]
+    cols += ["debito", "credito", "importe"]
+    if include_saldo:
+        cols.append("saldo")
+    cols += ["archivo", "hoja_origen", "fila_origen", "observaciones"]
 
-    # Filtrar sólo las columnas que existen (compatibilidad con datos anteriores)
-    cols = [c for c in cols if c in df.columns]
+    # Solo columnas que existen en el DataFrame
+    df_cols_lower = {str(c).strip().lower(): c for c in df.columns}
+    cols_exist = [c for c in cols if c in df_cols_lower]
 
-    export_df = df[cols].copy()
+    # Construir export_df con los nombres originales de columna
+    export_df = df[[df_cols_lower[c] for c in cols_exist]].copy()
+    export_df.columns = cols_exist  # normalizar a minúsculas
+
     export_df["fecha"] = pd.to_datetime(export_df["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
 
-    # Si la columna moneda no existe en datos anteriores, rellenar con la actual
-    if "moneda" not in export_df.columns:
-        export_df["moneda"] = moneda
-
-    # Encabezados de columna legibles con moneda dinámica
-    if moneda and moneda != "Sin definir":
-        header_importe = f"Importe ({moneda})"
-        header_saldo   = f"Saldo ({moneda})"
-    else:
-        header_importe = "Importe"
-        header_saldo   = "Saldo"
-
     rename_map = {
-        "fecha":       "Fecha",
-        "descripcion": "Descripción",
-        "importe":     header_importe,
-        "saldo":       header_saldo,
-        "referencia":  "Referencia",
-        "banco":       "Banco",
-        "cuenta":      "Cuenta",
-        "moneda":      "Moneda",
-        "archivo":     "Archivo",
+        "empresa":       "Empresa",
+        "banco":         "Banco",
+        "cuenta":        "Cuenta",
+        "nombre_corto":  "Nombre corto",
+        "moneda":        "Moneda",
+        "tipo_cuenta":   "Tipo cuenta",
+        "fecha":         "Fecha",
+        "descripcion":   "Descripción",
+        "referencia":    "Referencia",
+        "debito":        "Débito",
+        "credito":       "Crédito",
+        "importe":       "Importe neto",
+        "saldo":         "Saldo",
+        "archivo":       "Archivo origen",
+        "hoja_origen":   "Hoja origen",
+        "fila_origen":   "Fila origen",
+        "observaciones": "Observaciones",
     }
     export_df = export_df.rename(columns={k: v for k, v in rename_map.items() if k in export_df.columns})
 
@@ -73,7 +77,6 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # Vista previa del Excel
     st.caption("Vista previa de las primeras 5 filas:")
     st.dataframe(export_df.head(5), use_container_width=True, hide_index=True)
 
