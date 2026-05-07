@@ -43,67 +43,171 @@ def _safe_key(filename: str, size: int) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "_", f"{filename}_{size}")
 
 
+# ─── Detección automática desde nombre de archivo ────────────────────────────
+
+def _detect_bank_from_filename(filename: str) -> str:
+    """Deduce el banco desde el nombre del archivo."""
+    name = filename.upper()
+    if any(k in name for k in ["BMSC", "MERCANTIL"]):
+        return "Banco Mercantil Santa Cruz"
+    if "BNB" in name:
+        return "BNB"
+    if "BCP" in name:
+        return "BCP"
+    if any(k in name for k in ["BGA", "GANADERO"]):
+        return "Banco Ganadero"
+    if "BISA" in name:
+        return "Banco Bisa"
+    if any(k in name for k in ["UNION", "UNIÓN"]):
+        return "Banco Unión"
+    if "FIE" in name:
+        return "Banco FIE"
+    if any(k in name for k in ["ECONOMICO", "ECONÓMICO"]):
+        return "Banco Económico"
+    return "Genérico"
+
+
+def _detect_moneda_from_filename(filename: str) -> str:
+    """Deduce la moneda desde el nombre del archivo."""
+    name = filename.upper()
+    if any(k in name for k in ["USD", "DOLAR", "DOLARES", "$US"]):
+        return "USD"
+    if any(k in name for k in ["EUR", "EURO", "EUROS"]):
+        return "EUR"
+    if any(k in name for k in ["BOB", "BOLIVIANO", "BOLIVIANOS"]):
+        return "BOB"
+    return "BOB"
+
+
+def _auto_metadata_from_filename(filename: str, cuentas: list) -> dict:
+    """
+    Genera metadatos automáticos a partir del nombre del archivo.
+    Prioridad: maestro de cuentas → detección en nombre → valores por defecto.
+    """
+    banco_auto  = _detect_bank_from_filename(filename)
+    moneda_auto = _detect_moneda_from_filename(filename)
+
+    # Buscar coincidencia en el maestro de cuentas (por nombre de banco en el filename)
+    for c in cuentas:
+        banco_maestro = c.get("banco", "")
+        if banco_maestro and banco_maestro.upper() in filename.upper():
+            nc = c.get("nombre_corto") or f"{c.get('banco', '')} - {c.get('numero_cuenta', '')}"
+            return {
+                "empresa":       c.get("empresa", "Sin definir"),
+                "banco":         c.get("banco", banco_auto),
+                "cuenta":        c.get("numero_cuenta", "No identificada"),
+                "nombre_corto":  nc or "Cuenta no identificada",
+                "moneda":        c.get("moneda", moneda_auto),
+                "tipo_cuenta":   c.get("tipo_cuenta", "Sin definir"),
+                "observaciones": "",
+            }
+
+    nc = (
+        f"{banco_auto} - No identificada"
+        if banco_auto != "Genérico"
+        else "Cuenta no identificada"
+    )
+    return {
+        "empresa":       "Sin definir",
+        "banco":         banco_auto,
+        "cuenta":        "No identificada",
+        "nombre_corto":  nc,
+        "moneda":        moneda_auto,
+        "tipo_cuenta":   "Sin definir",
+        "observaciones": "",
+    }
+
+
 def _get_file_metadata(filename: str, size: int, cuentas: list) -> dict:
-    """Lee los valores actuales de los widgets de metadatos desde session_state."""
+    """
+    Devuelve metadatos del archivo.
+    Si no está en modo edición → auto-detección desde nombre de archivo.
+    Si está en modo edición → lee los widgets del formulario.
+    """
     safe = _safe_key(filename, size)
+
+    if not st.session_state.get(f"meta_{safe}_edit", False):
+        return _auto_metadata_from_filename(filename, cuentas)
+
     master_key = f"meta_{safe}_master"
     master_sel = st.session_state.get(master_key, "Manual")
-    nombres = ["Manual"] + [c.get("nombre_corto", "") for c in cuentas]
+    nombres    = ["Manual"] + [c.get("nombre_corto", "") for c in cuentas]
     master_idx = nombres.index(master_sel) if master_sel in nombres else 0
-    prefix = f"meta_{safe}_idx{master_idx}"
+    prefix     = f"meta_{safe}_idx{master_idx}"
+    auto       = _auto_metadata_from_filename(filename, cuentas)
     return {
-        "empresa":       st.session_state.get(f"{prefix}_empresa", ""),
-        "banco":         st.session_state.get(f"{prefix}_banco", ""),
-        "cuenta":        st.session_state.get(f"{prefix}_cuenta", ""),
-        "nombre_corto":  st.session_state.get(f"{prefix}_nombre_corto", ""),
-        "moneda":        st.session_state.get(f"{prefix}_moneda", "BOB"),
-        "tipo_cuenta":   st.session_state.get(f"{prefix}_tipo_cuenta", "Sin definir"),
-        "observaciones": st.session_state.get(f"{prefix}_observaciones", ""),
+        "empresa":       st.session_state.get(f"{prefix}_empresa",       auto["empresa"]),
+        "banco":         st.session_state.get(f"{prefix}_banco",         auto["banco"]),
+        "cuenta":        st.session_state.get(f"{prefix}_cuenta",        auto["cuenta"]),
+        "nombre_corto":  st.session_state.get(f"{prefix}_nombre_corto",  auto["nombre_corto"]),
+        "moneda":        st.session_state.get(f"{prefix}_moneda",        auto["moneda"]),
+        "tipo_cuenta":   st.session_state.get(f"{prefix}_tipo_cuenta",   auto["tipo_cuenta"]),
+        "observaciones": st.session_state.get(f"{prefix}_observaciones", auto["observaciones"]),
     }
 
 
 def _render_file_metadata_form(f, cuentas: list) -> None:
-    """Renderiza el formulario de metadatos para un archivo en el panel lateral."""
+    """
+    Muestra un resumen auto-detectado del archivo.
+    Solo si el usuario activa 'Editar datos del extracto' se despliega el formulario completo.
+    """
     safe = _safe_key(f.name, f.size)
-    master_key = f"meta_{safe}_master"
+    auto = _auto_metadata_from_filename(f.name, cuentas)
+
+    # Resumen automático (siempre visible)
+    col_a, col_b, col_c = st.columns(3)
+    col_a.caption(f"Banco: **{auto['banco']}**")
+    col_b.caption(f"Moneda: **{auto['moneda']}**")
+    col_c.caption(f"Empresa: **{auto['empresa']}**")
+
+    edit_key  = f"meta_{safe}_edit"
+    show_edit = st.checkbox("Editar datos del extracto", key=edit_key, value=False)
+
+    if not show_edit:
+        return
+
+    # ── Formulario completo (solo si el usuario lo activa) ────────────────
+    master_key      = f"meta_{safe}_master"
     nombres_maestro = ["Manual"] + [c.get("nombre_corto", "") for c in cuentas]
 
+    if cuentas:
+        st.caption("Cargar desde maestro:")
     master_sel = st.selectbox(
-        "Cuenta del maestro",
-        nombres_maestro,
-        key=master_key,
-        help="Selecciona una cuenta registrada para pre-rellenar los campos",
+        "Cuenta del maestro", nombres_maestro, key=master_key,
+        help="Pre-rellena los campos con datos del maestro",
         label_visibility="collapsed",
     )
 
     cuenta_data = next((c for c in cuentas if c.get("nombre_corto") == master_sel), None)
 
     def dv(campo, fallback=""):
-        return cuenta_data.get(campo, fallback) if cuenta_data else fallback
+        if cuenta_data:
+            return cuenta_data.get(campo, fallback)
+        return auto.get(campo, fallback)
 
     master_idx = nombres_maestro.index(master_sel) if master_sel in nombres_maestro else 0
-    prefix = f"meta_{safe}_idx{master_idx}"
+    prefix     = f"meta_{safe}_idx{master_idx}"
 
     c1, c2 = st.columns(2)
     with c1:
         emp_def = dv("empresa", "Sin definir")
         emp_idx = EMPRESAS.index(emp_def) if emp_def in EMPRESAS else len(EMPRESAS) - 1
         st.selectbox("Empresa", EMPRESAS, index=emp_idx, key=f"{prefix}_empresa")
-        st.text_input("N° Cuenta", value=dv("numero_cuenta"), key=f"{prefix}_cuenta",
-                      placeholder="000000000")
-        mon_def = dv("moneda", "BOB")
+        st.text_input("N° Cuenta", value=dv("numero_cuenta", auto["cuenta"]),
+                      key=f"{prefix}_cuenta", placeholder="000000000")
+        mon_def = dv("moneda", auto["moneda"])
         mon_idx = MONEDAS.index(mon_def) if mon_def in MONEDAS else 0
         st.selectbox("Moneda", MONEDAS, index=mon_idx, key=f"{prefix}_moneda")
     with c2:
-        st.text_input("Banco", value=dv("banco"), key=f"{prefix}_banco",
-                      placeholder="BNB / BCP / Banco Bisa…")
-        st.text_input("Nombre corto", value=dv("nombre_corto"), key=f"{prefix}_nombre_corto",
-                      placeholder="BNB Cte BOB")
+        st.text_input("Banco", value=dv("banco", auto["banco"]),
+                      key=f"{prefix}_banco", placeholder="BNB / BCP…")
+        st.text_input("Nombre corto", value=dv("nombre_corto", auto["nombre_corto"]),
+                      key=f"{prefix}_nombre_corto", placeholder="BNB Cte BOB")
         tipo_def = dv("tipo_cuenta", "Sin definir")
         tipo_idx = TIPOS_CUENTA.index(tipo_def) if tipo_def in TIPOS_CUENTA else len(TIPOS_CUENTA) - 1
         st.selectbox("Tipo cuenta", TIPOS_CUENTA, index=tipo_idx, key=f"{prefix}_tipo_cuenta")
 
-    st.text_input("Observaciones", value=dv("observaciones"),
+    st.text_input("Observaciones", value=dv("observaciones", ""),
                   key=f"{prefix}_observaciones", placeholder="Opcional")
 
 
@@ -501,7 +605,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: constantes de cuentas corregidas")
+st.caption("Versión: carga simplificada con datos automáticos")
 st.divider()
 
 cola = st.session_state.cola_mapeo
