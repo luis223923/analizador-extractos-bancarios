@@ -9,7 +9,7 @@ import pandas as pd
 
 from core.loader import load_file, reload_excel
 from core.normalizer import normalize, normalize_with_mapping, diagnose, get_registered_banks
-from core.schema import empty_standard_df, MONEDAS, TIPOS_CUENTA
+from core.schema import empty_standard_df, MONEDAS, TIPOS_CUENTA, EMPRESAS, BANCOS
 from core.accounts import load_accounts
 from modules.preview import render_preview
 from modules.classifier import render_classifier
@@ -86,8 +86,9 @@ def _render_file_metadata_form(f, cuentas: list) -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.text_input("Empresa", value=dv("empresa"), key=f"{prefix}_empresa",
-                      placeholder="Mi Empresa S.A.")
+        emp_def = dv("empresa", "Sin definir")
+        emp_idx = EMPRESAS.index(emp_def) if emp_def in EMPRESAS else len(EMPRESAS) - 1
+        st.selectbox("Empresa", EMPRESAS, index=emp_idx, key=f"{prefix}_empresa")
         st.text_input("N° Cuenta", value=dv("numero_cuenta"), key=f"{prefix}_cuenta",
                       placeholder="000000000")
         mon_def = dv("moneda", "BOB")
@@ -95,11 +96,11 @@ def _render_file_metadata_form(f, cuentas: list) -> None:
         st.selectbox("Moneda", MONEDAS, index=mon_idx, key=f"{prefix}_moneda")
     with c2:
         st.text_input("Banco", value=dv("banco"), key=f"{prefix}_banco",
-                      placeholder="Nombre del banco")
+                      placeholder="BNB / BCP / Banco Bisa…")
         st.text_input("Nombre corto", value=dv("nombre_corto"), key=f"{prefix}_nombre_corto",
                       placeholder="BNB Cte BOB")
         tipo_def = dv("tipo_cuenta", "Sin definir")
-        tipo_idx = TIPOS_CUENTA.index(tipo_def) if tipo_def in TIPOS_CUENTA else 0
+        tipo_idx = TIPOS_CUENTA.index(tipo_def) if tipo_def in TIPOS_CUENTA else len(TIPOS_CUENTA) - 1
         st.selectbox("Tipo cuenta", TIPOS_CUENTA, index=tipo_idx, key=f"{prefix}_tipo_cuenta")
 
     st.text_input("Observaciones", value=dv("observaciones"),
@@ -500,7 +501,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: saldos por banco, cuenta y moneda")
+st.caption("Versión: constantes de cuentas corregidas")
 st.divider()
 
 cola = st.session_state.cola_mapeo

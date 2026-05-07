@@ -59,7 +59,40 @@ COLUMN_DTYPES = {
 MONEDAS = ["BOB", "USD", "EUR", "Sin definir"]
 
 # Tipos de cuenta disponibles
-TIPOS_CUENTA = ["Sin definir", "Corriente", "Ahorro", "Vista", "Plazo Fijo", "Otra"]
+TIPOS_CUENTA = [
+    "Cuenta corriente",
+    "Caja de ahorro",
+    "Cuenta recaudadora",
+    "Cuenta operativa",
+    "Cuenta inversión",
+    "Cuenta custodia",
+    "Otra",
+    "Sin definir",
+]
+
+# Empresas registradas en el sistema
+EMPRESAS = [
+    "NSPF",
+    "NSVS",
+    "GNI",
+    "Otra",
+    "Sin definir",
+]
+
+# Bancos sugeridos (referencia — no limita el ingreso manual)
+BANCOS = [
+    "BNB",
+    "BCP",
+    "Banco Mercantil Santa Cruz",
+    "Banco Ganadero",
+    "Banco Bisa",
+    "Banco Unión",
+    "Banco Económico",
+    "Banco FIE",
+    "BancoSol",
+    "Otro",
+    "Sin definir",
+]
 
 # Prefijo de símbolo para cada moneda
 MONEDA_PREFIJO = {
