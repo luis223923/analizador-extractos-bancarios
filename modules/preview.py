@@ -3,7 +3,7 @@ Vista previa — buscador avanzado con filtros rápidos.
 """
 
 import unicodedata
-from datetime import date, timedelta, datetime
+from datetime import date, datetime
 from io import BytesIO
 
 import pandas as pd
@@ -47,16 +47,11 @@ _SEARCH_TEXT_COLS = [
     "beneficiario", "descripcion", "referencia",
     "sucursal", "observaciones",
 ]
-_PERIOD_OPTIONS = [
-    "Todo el período", "Hoy", "Ayer",
-    "Últimos 7 días", "Últimos 30 días",
-    "Este mes", "Mes anterior", "Personalizado",
-]
 _TOL_OPTIONS = {"0.01": 0.01, "1": 1.0, "10": 10.0, "100": 100.0, "1,000": 1000.0}
 _FILTER_KEYS = [
     "prev_buscar", "prev_banco", "prev_cuenta", "prev_moneda", "prev_tipo",
     "prev_fd", "prev_fh", "prev_mmin", "prev_mmax", "prev_mexacto",
-    "prev_tol", "prev_abs", "prev_periodo",
+    "prev_tol", "prev_abs",
 ]
 
 
@@ -76,26 +71,6 @@ def _build_search_col(df: pd.DataFrame) -> pd.Series:
     for p in parts:
         combined = combined + " " + (p if isinstance(p, pd.Series) else p)
     return combined.apply(_norm)
-
-
-def _compute_period(periodo: str, fecha_min: date, fecha_max: date) -> tuple:
-    today = date.today()
-    if periodo == "Hoy":
-        return today, today
-    if periodo == "Ayer":
-        y = today - timedelta(days=1)
-        return y, y
-    if periodo == "Últimos 7 días":
-        return today - timedelta(days=6), today
-    if periodo == "Últimos 30 días":
-        return today - timedelta(days=29), today
-    if periodo == "Este mes":
-        return today.replace(day=1), today
-    if periodo == "Mes anterior":
-        first_this = today.replace(day=1)
-        last_prev  = first_this - timedelta(days=1)
-        return last_prev.replace(day=1), last_prev
-    return fecha_min, fecha_max  # "Todo el período" / "Personalizado"
 
 
 def _num_series(df: pd.DataFrame, col: str, use_abs: bool) -> pd.Series:
@@ -264,17 +239,25 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
                 st.session_state.pop(k, None)
             st.rerun()
 
-    # ── Filtros rápidos ───────────────────────────────────────────────────
-    st.caption("**Filtros rápidos:**")
-    st.radio(
-        "periodo",
-        _PERIOD_OPTIONS,
-        index=0,
-        key="prev_periodo",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    periodo = st.session_state.get("prev_periodo", "Todo el período")
+    # ── Fechas (siempre visibles) ─────────────────────────────────────────
+    fd_col, fh_col = st.columns(2)
+    with fd_col:
+        fd_activo = st.date_input(
+            "Fecha desde",
+            value=fecha_min,
+            min_value=fecha_min,
+            max_value=fecha_max,
+            key="prev_fd",
+        )
+    with fh_col:
+        fh_activo = st.date_input(
+            "Fecha hasta",
+            value=fecha_max,
+            min_value=fecha_min,
+            max_value=fecha_max,
+            key="prev_fh",
+        )
+    st.caption(f"Rango aplicado: {fd_activo.strftime('%d/%m/%Y')} a {fh_activo.strftime('%d/%m/%Y')}")
 
     # ── Filtros avanzados ─────────────────────────────────────────────────
     with st.expander("⚙ Filtros avanzados", expanded=False):
@@ -293,7 +276,6 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
             else:
                 df_cuentas = df_valido
             cuentas_opts = ["Todas"] + sorted(df_cuentas["cuenta"].dropna().unique().tolist()) if "cuenta" in df_cuentas.columns else ["Todas"]
-            # Evitar ValueError si la cuenta guardada no existe en las nuevas opciones
             prev_cuenta = st.session_state.get("prev_cuenta", "Todas")
             if prev_cuenta not in cuentas_opts:
                 st.session_state["prev_cuenta"] = "Todas"
@@ -310,49 +292,23 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
                 key="prev_tipo",
             )
 
-        # Fila 2: Fechas · Montos
-        r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-
-        fd_def, fh_def = _compute_period(periodo, fecha_min, fecha_max)
+        # Fila 2: Montos
+        r2c1, r2c2, r2c3 = st.columns(3)
 
         with r2c1:
-            if periodo == "Personalizado":
-                st.date_input("Fecha desde", value=fd_def,
-                              min_value=fecha_min, max_value=fecha_max, key="prev_fd")
-            else:
-                st.date_input("Fecha desde", value=fd_def,
-                              min_value=fecha_min, max_value=fecha_max,
-                              key="prev_fd_dis", disabled=True)
-
-        with r2c2:
-            if periodo == "Personalizado":
-                st.date_input("Fecha hasta", value=fh_def,
-                              min_value=fecha_min, max_value=fecha_max, key="prev_fh")
-            else:
-                st.date_input("Fecha hasta", value=fh_def,
-                              min_value=fecha_min, max_value=fecha_max,
-                              key="prev_fh_dis", disabled=True)
-
-        with r2c3:
             st.number_input("Monto desde", min_value=0.0, value=0.0, step=1.0,
                             key="prev_mmin", format="%.2f")
             st.number_input("Monto hasta", min_value=0.0, value=0.0, step=1.0,
                             key="prev_mmax", format="%.2f")
 
-        with r2c4:
+        with r2c2:
             st.number_input("Monto exacto (opcional)", min_value=0.0, value=0.0,
                             step=0.01, key="prev_mexacto", format="%.2f")
             st.selectbox("Tolerancia ±", list(_TOL_OPTIONS.keys()), key="prev_tol")
-            st.checkbox("Buscar por valor absoluto", key="prev_abs", value=True)
 
-    # ── Leer estado de filtros ────────────────────────────────────────────
-    if periodo == "Personalizado":
-        fd_activo = st.session_state.get("prev_fd", fd_def)
-        fh_activo = st.session_state.get("prev_fh", fh_def)
-    else:
-        fd_activo, fh_activo = _compute_period(periodo, fecha_min, fecha_max)
-        if periodo != "Todo el período":
-            st.caption(f"📅 {periodo}: {fd_activo.strftime('%d/%m/%Y')} — {fh_activo.strftime('%d/%m/%Y')}")
+        with r2c3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.checkbox("Buscar por valor absoluto", key="prev_abs", value=True)
 
     monto_min_val    = st.session_state.get("prev_mmin", 0.0) or 0.0
     monto_max_val    = st.session_state.get("prev_mmax", 0.0) or 0.0
