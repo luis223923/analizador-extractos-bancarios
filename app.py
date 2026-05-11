@@ -1092,7 +1092,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: filtrado avanzado y gestión de pendientes")
+st.caption("Versión: buscador avanzado con filtros rápidos")
 st.divider()
 
 cola      = st.session_state.cola_mapeo
