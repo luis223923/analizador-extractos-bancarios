@@ -112,53 +112,58 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
 
     st.divider()
 
-    # ── Tabla principal (solo columnas relevantes para Tesorería) ─────────
+    # ── Tabla principal — cabecera estándar de Tesorería ─────────────────
     display_df = filtered.copy()
+    display_df["fecha"] = display_df["fecha"].dt.strftime("%d/%m/%Y")
 
-    # Columna de tipo de movimiento derivada de importe
-    imp_col = pd.to_numeric(display_df["importe"], errors="coerce")
-    display_df["tipo_mov"] = imp_col.apply(
-        lambda x: "Ingreso" if x > 0 else ("Gasto" if x < 0 else "Neutro")
-    )
-
-    # Formatear montos con moneda por fila
-    def _fmt_row(row, col):
+    # Formatear montos numéricos por moneda de fila
+    def _fmt_bob(row, col):
         try:
-            v   = float(row[col])
-            mon = str(row.get("moneda", "Sin definir"))
-            if col in ("debito", "credito") and v == 0.0:
-                return ""          # no mostrar ceros en débito/crédito
-            return fmt_amount(v, mon)
+            v = float(row[col])
+            return "" if (col in ("debito_bob", "credito_bob") and v == 0.0) else fmt_amount(v, "BOB")
         except (TypeError, ValueError):
             return ""
 
-    for col_monto in ["debito", "credito", "importe", "saldo"]:
-        if col_monto in display_df.columns:
-            display_df[col_monto] = display_df.apply(
-                lambda r, c=col_monto: _fmt_row(r, c), axis=1
-            )
+    def _fmt_usd(row, col):
+        try:
+            v = float(row[col])
+            return "" if (col in ("debito_usd", "credito_usd") and v == 0.0) else fmt_amount(v, "USD")
+        except (TypeError, ValueError):
+            return ""
 
-    # Fecha legible
-    display_df["fecha"] = display_df["fecha"].dt.strftime("%d/%m/%Y")
+    for col_m in ["debito_bob", "credito_bob", "importe_bob"]:
+        if col_m in display_df.columns:
+            display_df[col_m] = display_df.apply(lambda r, c=col_m: _fmt_bob(r, c), axis=1)
 
-    # Seleccionar solo columnas visibles (en orden deseado)
-    visible = [
-        "fecha", "banco", "cuenta", "moneda",
-        "descripcion", "debito", "credito", "importe", "saldo",
-        "tipo_mov", "observaciones",
+    for col_m in ["debito_usd", "credito_usd", "importe_usd"]:
+        if col_m in display_df.columns:
+            display_df[col_m] = display_df.apply(lambda r, c=col_m: _fmt_usd(r, c), axis=1)
+
+    # Orden de columnas estándar
+    visible_order = [
+        "empresa", "banco", "cuenta",
+        "fecha", "hora", "beneficiario", "descripcion", "referencia",
+        "debito_bob", "credito_bob", "importe_bob",
+        "debito_usd", "credito_usd", "importe_usd",
+        "sucursal", "observaciones",
     ]
-    visible = [c for c in visible if c in display_df.columns]
+    visible = [c for c in visible_order if c in display_df.columns]
     display_df = display_df[visible].rename(columns={
-        "fecha":        "Fecha",
+        "empresa":      "Empresa",
         "banco":        "Banco",
         "cuenta":       "Cuenta",
-        "moneda":       "Moneda",
+        "fecha":        "Fecha",
+        "hora":         "Hora",
+        "beneficiario": "Beneficiario/Ordenante",
         "descripcion":  "Descripción",
-        "debito":       "Débito",
-        "credito":      "Crédito",
-        "importe":      "Importe",
-        "saldo":        "Saldo",
-        "tipo_mov":     "Tipo",
+        "referencia":   "Referencia",
+        "debito_bob":   "Débito Bs",
+        "credito_bob":  "Crédito Bs",
+        "importe_bob":  "Importe Bs",
+        "debito_usd":   "Débito USD",
+        "credito_usd":  "Crédito USD",
+        "importe_usd":  "Importe USD",
+        "sucursal":     "Sucursal",
         "observaciones":"Observaciones",
     })
 

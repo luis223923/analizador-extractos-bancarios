@@ -27,9 +27,22 @@ _DESC_HINTS = [
     "operacion", "operación", "glosa", "referencia texto", "comercio",
     "texto", "narracion", "narración", "nota", "observacion", "observación",
     "descripcion movimiento", "descripcion operacion", "concepto operacion",
-    "motivo", "beneficiario", "ordenante", "remitente", "destinatario",
-    "description", "details", "narrative", "particulars", "memo",
+    "motivo", "description", "details", "narrative", "particulars", "memo",
     "denominacion", "denominación", "nombre operacion",
+]
+_HORA_HINTS = [
+    "hora", "time", "hour", "hh:mm", "hora operacion", "hora mov",
+    "hora transaccion", "hora registro", "hora proceso",
+]
+_BENEFICIARIO_HINTS = [
+    "beneficiario", "ordenante", "remitente", "destinatario",
+    "nombre beneficiario", "nombre ordenante", "pagador", "receptor",
+    "beneficiary", "payee", "payer", "counterpart", "contraparte",
+]
+_SUCURSAL_HINTS = [
+    "sucursal", "agencia", "canal", "oficina", "branch",
+    "punto atencion", "punto de atención", "canal origen",
+    "terminal", "cajero", "atm",
 ]
 _IMPORTE_HINTS = [
     "importe", "monto", "cantidad", "amount",
@@ -123,14 +136,17 @@ def detect_columns(df: pd.DataFrame) -> dict:
     # Importe se detecta ANTES que débito/crédito para evitar que una columna
     # llamada "Importe" sea captada por hints compuestos como "importe debito".
     return {
-        "fecha":       pick(_FECHA_HINTS),
-        "descripcion": pick(_DESC_HINTS),
-        "importe":     pick(_IMPORTE_HINTS),
-        "debito":      pick(_DEBITO_HINTS),
-        "credito":     pick(_CREDITO_HINTS),
-        "saldo":       pick(_SALDO_HINTS),
-        "referencia":  pick(_REF_HINTS),
-        "cuenta":      pick(_CUENTA_HINTS),
+        "fecha":        pick(_FECHA_HINTS),
+        "descripcion":  pick(_DESC_HINTS),
+        "importe":      pick(_IMPORTE_HINTS),
+        "debito":       pick(_DEBITO_HINTS),
+        "credito":      pick(_CREDITO_HINTS),
+        "saldo":        pick(_SALDO_HINTS),
+        "referencia":   pick(_REF_HINTS),
+        "cuenta":       pick(_CUENTA_HINTS),
+        "hora":         pick(_HORA_HINTS),
+        "beneficiario": pick(_BENEFICIARIO_HINTS),
+        "sucursal":     pick(_SUCURSAL_HINTS),
     }
 
 
@@ -274,17 +290,23 @@ def parse_with_mapping(
     """
     Convierte df al esquema estándar usando un mapeo explícito de columnas.
 
-    mapping keys: fecha, descripcion, debito, credito, importe, saldo, referencia, cuenta
+    mapping keys: fecha, descripcion, debito, credito, importe, saldo,
+                  referencia, cuenta, hora, beneficiario, sucursal
     Los valores son nombres de columna del df o None para ignorar.
     """
-    col_fecha   = mapping.get("fecha")
-    col_desc    = mapping.get("descripcion")
-    col_debito  = mapping.get("debito")
-    col_credito = mapping.get("credito")
-    col_importe = mapping.get("importe")
-    col_saldo   = mapping.get("saldo")
-    col_ref     = mapping.get("referencia")
-    col_cuenta  = mapping.get("cuenta")
+    from utils.text_cleaning import extract_time
+
+    col_fecha        = mapping.get("fecha")
+    col_desc         = mapping.get("descripcion")
+    col_debito       = mapping.get("debito")
+    col_credito      = mapping.get("credito")
+    col_importe      = mapping.get("importe")
+    col_saldo        = mapping.get("saldo")
+    col_ref          = mapping.get("referencia")
+    col_cuenta       = mapping.get("cuenta")
+    col_hora         = mapping.get("hora")
+    col_beneficiario = mapping.get("beneficiario")
+    col_sucursal     = mapping.get("sucursal")
 
     if not col_fecha:
         raise ValueError("Debes seleccionar la columna de Fecha.")
@@ -303,6 +325,17 @@ def parse_with_mapping(
     out["banco"]       = bank_name
     out["cuenta"]      = df[col_cuenta].astype(str).str.strip() if col_cuenta else pd.NA
     out["archivo"]     = filename
+
+    # Campos opcionales de la nueva cabecera estándar
+    if col_hora:
+        out["hora"] = df[col_hora].astype(str).str.strip()
+    else:
+        out["hora"] = df[col_fecha].apply(extract_time) if col_fecha else ""
+
+    if col_beneficiario:
+        out["beneficiario"] = df[col_beneficiario].astype(str).str.strip()
+    if col_sucursal:
+        out["sucursal"] = df[col_sucursal].astype(str).str.strip()
 
     return out.dropna(subset=["fecha", "importe"])
 

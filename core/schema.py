@@ -27,6 +27,15 @@ _EXTENDED_COLUMNS = [
     "tipo_cuenta",   # str       — Corriente, Ahorro, Vista, Plazo Fijo, Otra
     "debito",        # float     — valor absoluto del egreso (>= 0)
     "credito",       # float     — valor absoluto del ingreso (>= 0)
+    "hora",          # str       — hora de la operación (HH:MM)
+    "beneficiario",  # str       — beneficiario u ordenante del movimiento
+    "sucursal",      # str       — sucursal o canal de la operación
+    "debito_bob",    # float     — débito en BOB (NaN si moneda != BOB)
+    "credito_bob",   # float     — crédito en BOB (NaN si moneda != BOB)
+    "importe_bob",   # float     — importe neto en BOB (NaN si moneda != BOB)
+    "debito_usd",    # float     — débito en USD (NaN si moneda != USD)
+    "credito_usd",   # float     — crédito en USD (NaN si moneda != USD)
+    "importe_usd",   # float     — importe neto en USD (NaN si moneda != USD)
     "hoja_origen",   # str       — hoja del Excel de origen
     "fila_origen",   # str       — fila aproximada en el archivo de origen
     "carpeta_origen",# str       — carpeta dentro del ZIP de origen
@@ -52,6 +61,15 @@ COLUMN_DTYPES = {
     "tipo_cuenta":    "object",
     "debito":         "float64",
     "credito":        "float64",
+    "hora":           "object",
+    "beneficiario":   "object",
+    "sucursal":       "object",
+    "debito_bob":     "float64",
+    "credito_bob":    "float64",
+    "importe_bob":    "float64",
+    "debito_usd":     "float64",
+    "credito_usd":    "float64",
+    "importe_usd":    "float64",
     "hoja_origen":    "object",
     "fila_origen":    "object",
     "carpeta_origen": "object",
