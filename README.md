@@ -61,8 +61,8 @@ streamlit run app.py
 3. **Explora las pestañas:**
    - **Vista previa** — Tabla de movimientos con filtros por fecha, banco e importe
    - **Clasificación** — *(próximamente)* Categorizar movimientos por tipo
-   - **Saldos** — *(próximamente)* Evolución del saldo por cuenta
-   - **Duplicados** — *(próximamente)* Detectar apuntes repetidos
+   - **Saldos** — Disponibilidad bancaria por empresa, cuenta y moneda
+   - **Duplicados** — Detección de duplicados por criterios de riesgo
    - **Exportar** — Descarga el consolidado como Excel
 
 ---
@@ -101,7 +101,8 @@ analizador-extractos-bancarios/
 ├── core/                    ← Motor central del sistema
 │   ├── schema.py            ← Esquema estándar de columnas
 │   ├── loader.py            ← Lectura de archivos Excel y CSV
-│   └── normalizer.py        ← Selección automática del parser correcto
+│   ├── normalizer.py        ← Selección automática del parser correcto
+│   └── accounts.py          ← Maestro de cuentas bancarias
 │
 ├── banks/                   ← Un archivo por banco
 │   ├── base.py              ← Clase base que deben implementar todos los parsers
@@ -111,58 +112,15 @@ analizador-extractos-bancarios/
 ├── modules/                 ← Módulos funcionales independientes
 │   ├── preview.py           ← Vista previa con filtros
 │   ├── classifier.py        ← Clasificación por categorías (en desarrollo)
-│   ├── balances.py          ← Análisis de saldos (en desarrollo)
-│   ├── duplicates.py        ← Detección de duplicados (en desarrollo)
+│   ├── balances.py          ← Disponibilidad bancaria por empresa y moneda
+│   ├── duplicates.py        ← Detección de duplicados por criterios de riesgo
 │   └── exporter.py          ← Exportación a Excel
+│
+├── config/
+│   └── cuentas_bancarias.json  ← Maestro de cuentas
 │
 └── data/samples/            ← Archivos de ejemplo para pruebas
 ```
-
-### Añadir soporte para un nuevo banco
-
-1. Crea el archivo `banks/nombre_banco.py`
-2. Implementa una clase que herede de `BankParser`:
-
-```python
-from banks.base import BankParser
-from core.schema import empty_standard_df
-import pandas as pd
-
-class MiBancoParser(BankParser):
-    bank_name = "Mi Banco"
-    priority = 70  # mayor = se prueba antes
-
-    def can_parse(self, df: pd.DataFrame, filename: str = "") -> bool:
-        # Devuelve True si reconoces el formato de este DataFrame
-        cols = {c.strip().lower() for c in df.columns}
-        return {"fecha valor", "concepto", "importe"}.issubset(cols)
-
-    def parse(self, df: pd.DataFrame, filename: str = "") -> pd.DataFrame:
-        out = empty_standard_df()
-        out["fecha"] = pd.to_datetime(df["Fecha Valor"], dayfirst=True, errors="coerce")
-        out["descripcion"] = df["Concepto"].astype(str)
-        out["importe"] = pd.to_numeric(df["Importe"], errors="coerce")
-        out["saldo"] = pd.NA
-        out["referencia"] = pd.NA
-        out["banco"] = self.bank_name
-        out["cuenta"] = pd.NA
-        out["archivo"] = filename
-        return out.dropna(subset=["fecha", "importe"])
-```
-
-3. Importa la clase en `core/normalizer.py`:
-
-```python
-from banks.mi_banco import MiBancoParser
-
-_REGISTERED_PARSERS = [
-    BBVAParser(),
-    MiBancoParser(),   # ← añadir aquí
-    GenericParser(),
-]
-```
-
-Eso es todo. No hay que tocar nada más.
 
 ---
 

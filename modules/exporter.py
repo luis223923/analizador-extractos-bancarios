@@ -1,8 +1,9 @@
 """
 Módulo de exportación a Excel con formato de Tesorería.
-Incluye todas las columnas del esquema extendido:
+Incluye todas las columnas del esquema extendido incluyendo trazabilidad ZIP:
 empresa, banco, cuenta, nombre_corto, moneda, tipo_cuenta,
-debito, credito, importe, saldo, hoja_origen, fila_origen, observaciones.
+debito, credito, importe, saldo, carpeta_origen, ruta_zip,
+hoja_origen, fila_origen, observaciones.
 """
 
 import io
@@ -35,7 +36,10 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
     cols += ["debito", "credito", "importe"]
     if include_saldo:
         cols.append("saldo")
-    cols += ["archivo", "hoja_origen", "fila_origen", "observaciones"]
+    cols += [
+        "archivo", "carpeta_origen", "ruta_zip",
+        "hoja_origen", "fila_origen", "observaciones",
+    ]
 
     # Solo columnas que existen en el DataFrame
     df_cols_lower = {str(c).strip().lower(): c for c in df.columns}
@@ -48,23 +52,25 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
     export_df["fecha"] = pd.to_datetime(export_df["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
 
     rename_map = {
-        "empresa":       "Empresa",
-        "banco":         "Banco",
-        "cuenta":        "Cuenta",
-        "nombre_corto":  "Nombre corto",
-        "moneda":        "Moneda",
-        "tipo_cuenta":   "Tipo cuenta",
-        "fecha":         "Fecha",
-        "descripcion":   "Descripción",
-        "referencia":    "Referencia",
-        "debito":        "Débito",
-        "credito":       "Crédito",
-        "importe":       "Importe neto",
-        "saldo":         "Saldo",
-        "archivo":       "Archivo origen",
-        "hoja_origen":   "Hoja origen",
-        "fila_origen":   "Fila origen",
-        "observaciones": "Observaciones",
+        "empresa":        "Empresa",
+        "banco":          "Banco",
+        "cuenta":         "Cuenta",
+        "nombre_corto":   "Nombre corto",
+        "moneda":         "Moneda",
+        "tipo_cuenta":    "Tipo cuenta",
+        "fecha":          "Fecha",
+        "descripcion":    "Descripción",
+        "referencia":     "Referencia",
+        "debito":         "Débito",
+        "credito":        "Crédito",
+        "importe":        "Importe neto",
+        "saldo":          "Saldo",
+        "archivo":        "Archivo origen",
+        "carpeta_origen": "Carpeta origen",
+        "ruta_zip":       "Ruta ZIP",
+        "hoja_origen":    "Hoja origen",
+        "fila_origen":    "Fila origen",
+        "observaciones":  "Observaciones",
     }
     export_df = export_df.rename(columns={k: v for k, v in rename_map.items() if k in export_df.columns})
 
