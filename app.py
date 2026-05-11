@@ -607,7 +607,7 @@ def render_mapping_ui(pending: dict):
                 st.error(str(e))
 
     with col_skip:
-        if st.button("Descartar archivo", use_container_width=True):
+        if st.button("Descartar este archivo", use_container_width=True):
             st.session_state.cola_mapeo.pop(0)
             st.rerun()
 
@@ -618,6 +618,30 @@ def render_mapping_ui(pending: dict):
             f"Ya tienes {n:,} movimientos consolidados de archivos anteriores. "
             "La vista completa aparecerá cuando termines el mapeo."
         )
+
+    # ── Lista completa de archivos pendientes con opción de quitar ────────
+    cola_actual = st.session_state.cola_mapeo
+    if len(cola_actual) >= 1:
+        st.divider()
+        with st.expander(f"📋 Cola de archivos pendientes — {len(cola_actual)} archivo(s)", expanded=True):
+            st.caption("Puedes quitar cualquier archivo de la lista sin necesidad de mapearlo.")
+            for i, item in enumerate(cola_actual):
+                item_meta  = item.get("metadata", {})
+                item_diag  = item.get("diagnostic", {})
+                causa      = item_diag.get("causa_falla", "")
+                banco_str  = item_meta.get("banco", "")
+                cuenta_str = item_meta.get("cuenta", "")
+                info_str   = " | ".join(p for p in [banco_str, cuenta_str] if p)
+                label      = "→ (en pantalla ahora)" if i == 0 else ""
+
+                col_n, col_i, col_c, col_btn = st.columns([3, 3, 3, 1])
+                col_n.markdown(f"**{item['filename']}** {label}")
+                col_i.caption(info_str or "—")
+                col_c.caption(f"⚠ {causa[:60]}" if causa else "")
+                safe_key = re.sub(r"[^a-zA-Z0-9]", "_", f"quitar_{i}_{item['filename']}")
+                if col_btn.button("Quitar", key=safe_key, use_container_width=True):
+                    st.session_state.cola_mapeo.pop(i)
+                    st.rerun()
 
 
 # ─── Barra lateral ────────────────────────────────────────────────────────────
@@ -893,7 +917,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: lectura robusta débito/crédito en ZIP")
+st.caption("Versión: gestión de cola de mapeo manual")
 st.divider()
 
 cola = st.session_state.cola_mapeo
