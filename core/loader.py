@@ -153,7 +153,7 @@ def detect_moneda_from_name(name: str) -> str | None:
 # ─── Carga de ZIP ─────────────────────────────────────────────────────────
 
 _SKIP_PARTS = {"__macosx", ".ds_store"}
-_VALID_EXTS = {"xlsx", "xls", "csv"}
+_VALID_EXTS = {"xlsx", "xls", "csv", "pdf"}
 
 
 def load_zip_entries(zip_bytes: bytes) -> list[ZipFileEntry]:
@@ -222,6 +222,8 @@ def load_zip_entry_to_loadinfo(entry: ZipFileEntry) -> LoadInfo:
         return _load_excel_smart(entry.raw_bytes, entry.filename, ext)
     elif ext == "csv":
         return _load_csv_smart(entry.raw_bytes, entry.filename)
+    elif ext == "pdf":
+        return _load_pdf_smart(entry.raw_bytes, entry.filename)
     else:
         raise ValueError(f"Formato no soportado: {entry.filename}")
 
@@ -241,8 +243,10 @@ def load_file(uploaded_file) -> LoadInfo:
         return _load_excel_smart(raw_bytes, filename, ext)
     elif ext == "csv":
         return _load_csv_smart(raw_bytes, filename)
+    elif ext == "pdf":
+        return _load_pdf_smart(raw_bytes, filename)
     else:
-        raise ValueError(f"Formato no soportado: .{ext}. Use Excel (.xlsx, .xls) o CSV.")
+        raise ValueError(f"Formato no soportado: .{ext}. Use Excel (.xlsx, .xls), CSV o PDF.")
 
 
 def reload_excel(raw_bytes: bytes, filename: str, sheet_name: str, header_row: int) -> pd.DataFrame:
@@ -341,6 +345,80 @@ def _detect_header_row(raw_bytes: bytes, sheet_name: str, max_scan: int = 30) ->
             best_row = int(i)
 
     return best_row
+
+
+# ─── Carga PDF ───────────────────────────────────────────────────────────
+
+def _load_pdf_smart(raw_bytes: bytes, filename: str) -> LoadInfo:
+    """
+    Extrae tablas de un PDF digital con pdfplumber.
+    Para PDFs escaneados (sin tablas) devuelve df_raw vacío
+    con ext="pdf" para que app.py lo marque como Pendiente de OCR.
+    """
+    try:
+        import pdfplumber  # noqa: PLC0415
+    except ImportError:
+        raise ValueError(
+            "pdfplumber no instalado. Ejecute: pip install pdfplumber>=0.10.0"
+        )
+
+    buf = io.BytesIO(raw_bytes)
+    headers: list | None = None
+    all_rows: list[list] = []
+
+    try:
+        with pdfplumber.open(buf) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    if not table:
+                        continue
+                    for row in table:
+                        cells = [str(c).strip() if c else "" for c in row]
+                        if not any(cells):
+                            continue
+                        if headers is None:
+                            headers = [c if c else f"Col{j}" for j, c in enumerate(cells)]
+                        else:
+                            norm_row = [re.sub(r"[^a-z0-9]", "", c.lower()) for c in cells]
+                            norm_hdr = [re.sub(r"[^a-z0-9]", "", h.lower()) for h in headers]
+                            if norm_row == norm_hdr:
+                                continue
+                            all_rows.append(cells)
+    except Exception as e:
+        raise ValueError(f"No se pudo leer el PDF '{filename}': {e}")
+
+    if not all_rows:
+        return LoadInfo(
+            df_raw=pd.DataFrame(),
+            filename=filename,
+            ext="pdf",
+            raw_bytes=raw_bytes,
+        )
+
+    if headers is None:
+        headers = [f"Col{i}" for i in range(len(all_rows[0]))]
+
+    n_cols = len(headers)
+    norm_rows = []
+    for row in all_rows:
+        if len(row) < n_cols:
+            row = row + [""] * (n_cols - len(row))
+        norm_rows.append(row[:n_cols])
+
+    df = pd.DataFrame(norm_rows, columns=headers)
+    df = df.replace("", pd.NA).dropna(how="all").reset_index(drop=True)
+    df = df.where(df.notna(), other="")
+
+    if df.empty:
+        raise ValueError(f"El PDF '{filename}' no contiene tablas con datos.")
+
+    return LoadInfo(
+        df_raw=df,
+        filename=filename,
+        ext="pdf",
+        raw_bytes=raw_bytes,
+    )
 
 
 # ─── Carga CSV ──────────────────────────────────────────────────────────
