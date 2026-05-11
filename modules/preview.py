@@ -50,7 +50,7 @@ _SEARCH_TEXT_COLS = [
 _TOL_OPTIONS = {"0.01": 0.01, "1": 1.0, "10": 10.0, "100": 100.0, "1,000": 1000.0}
 _FILTER_KEYS = [
     "prev_buscar", "prev_banco", "prev_cuenta", "prev_moneda", "prev_tipo",
-    "prev_fd", "prev_fh", "prev_mmin", "prev_mmax", "prev_mexacto",
+    "prev_rango", "prev_mmin", "prev_mmax", "prev_mexacto",
     "prev_tol", "prev_abs",
 ]
 
@@ -239,24 +239,20 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
                 st.session_state.pop(k, None)
             st.rerun()
 
-    # ── Fechas (siempre visibles) ─────────────────────────────────────────
-    fd_col, fh_col = st.columns(2)
-    with fd_col:
-        fd_activo = st.date_input(
-            "Fecha desde",
-            value=fecha_min,
-            min_value=fecha_min,
-            max_value=fecha_max,
-            key="prev_fd",
-        )
-    with fh_col:
-        fh_activo = st.date_input(
-            "Fecha hasta",
-            value=fecha_max,
-            min_value=fecha_min,
-            max_value=fecha_max,
-            key="prev_fh",
-        )
+    # ── Rango de fechas ───────────────────────────────────────────────────
+    rango = st.date_input(
+        "Rango de fechas",
+        value=(fecha_min, fecha_max),
+        min_value=fecha_min,
+        max_value=fecha_max,
+        key="prev_rango",
+    )
+    if isinstance(rango, (list, tuple)) and len(rango) == 2:
+        fd_activo, fh_activo = rango[0], rango[1]
+    elif isinstance(rango, (list, tuple)) and len(rango) == 1:
+        fd_activo = fh_activo = rango[0]
+    else:
+        fd_activo = fh_activo = rango
     st.caption(f"Rango aplicado: {fd_activo.strftime('%d/%m/%Y')} a {fh_activo.strftime('%d/%m/%Y')}")
 
     # ── Filtros avanzados ─────────────────────────────────────────────────
