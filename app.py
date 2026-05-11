@@ -41,6 +41,12 @@ if "cola_mapeo" not in st.session_state:
 if "diagnostico" not in st.session_state:
     st.session_state.diagnostico = []
 
+if "mapeo_idx" not in st.session_state:
+    st.session_state.mapeo_idx = 0
+
+if "en_mapeo" not in st.session_state:
+    st.session_state.en_mapeo = False
+
 
 # ─── Helpers de metadatos ─────────────────────────────────────────────────────
 
@@ -396,15 +402,148 @@ def render_welcome():
         )
 
 
-def render_diagnostico_tab() -> None:
-    """Tabla de diagnóstico detallado de todos los archivos procesados en la sesión."""
-    st.subheader("Diagnóstico de carga")
+def render_pending_tab() -> None:
+    """
+    Pestaña combinada: resumen de carga + gestión de pendientes + historial.
+    """
+    cola = st.session_state.cola_mapeo
     diag = st.session_state.get("diagnostico", [])
+
+    # ── Resumen de carga ──────────────────────────────────────────────────
+    n_total = len(diag)
+    n_ok    = sum(1 for d in diag if d.get("Estado") == "OK")
+    n_pend  = len(cola)
+    n_ocr   = sum(1 for d in diag if d.get("Estado") == "Pendiente de OCR")
+    n_rev   = sum(1 for d in diag if d.get("Estado") == "Pendiente de revisión")
+    n_err   = sum(1 for d in diag if d.get("Estado") == "Error")
+    n_mov   = len(st.session_state.df_consolidado)
+
+    st.subheader("Resumen de carga")
+    cm1, cm2, cm3, cm4, cm5, cm6 = st.columns(6)
+    cm1.metric("Total detectados",         n_total)
+    cm2.metric("✓ Procesados",             n_ok)
+    cm3.metric("⚠ Pendientes de mapeo",    n_pend)
+    cm4.metric("📄 Pendiente de OCR",      n_ocr)
+    cm5.metric("✗ Con error",              n_err + n_rev)
+    cm6.metric("Movimientos consolidados", f"{n_mov:,}")
+
+    st.divider()
+
+    # ── Archivos pendientes de mapeo ─────────────────────────────────────
+    if cola:
+        st.subheader(f"Archivos pendientes de mapeo ({len(cola)})")
+
+        # Filtros
+        pf1, pf2, pf3, pf4 = st.columns(4)
+        with pf1:
+            bancos_pend = ["Todos"] + sorted({
+                p.get("metadata", {}).get("banco", "") for p in cola
+                if p.get("metadata", {}).get("banco")
+            })
+            banco_pf = st.selectbox("Banco", bancos_pend, key="pend_banco_f")
+        with pf2:
+            tipos_pend = ["Todos"] + sorted({p.get("ext", "—").upper() for p in cola})
+            tipo_pf    = st.selectbox("Tipo archivo", tipos_pend, key="pend_tipo_f")
+        with pf3:
+            carpetas_pend = ["Todas"] + sorted({
+                p.get("metadata", {}).get("carpeta_origen") or "(raíz)" for p in cola
+            })
+            carpeta_pf = st.selectbox("Carpeta", carpetas_pend, key="pend_carpeta_f")
+        with pf4:
+            archivo_pf = st.text_input("Buscar archivo", key="pend_archivo_f", placeholder="nombre…")
+
+        # Aplicar filtros a la cola
+        cola_filtrada = [
+            (i, p) for i, p in enumerate(cola)
+            if (banco_pf == "Todos"  or p.get("metadata", {}).get("banco", "") == banco_pf)
+            and (tipo_pf == "Todos"  or p.get("ext", "").upper() == tipo_pf)
+            and (carpeta_pf == "Todas" or (p.get("metadata", {}).get("carpeta_origen") or "(raíz)") == carpeta_pf)
+            and (not archivo_pf or archivo_pf.lower() in p["filename"].lower())
+        ]
+
+        if cola_filtrada:
+            # Cabecera de la tabla
+            hdr = st.columns([3, 2, 2, 1, 2, 3, 1, 1])
+            for h, lbl in zip(hdr, ["Archivo", "Banco", "Cuenta", "Tipo", "Carpeta", "Motivo", "", ""]):
+                h.caption(f"**{lbl}**")
+
+            for i, p in cola_filtrada:
+                meta_p    = p.get("metadata", {})
+                diag_p    = p.get("diagnostic", {})
+                causa     = diag_p.get("causa_falla", "")
+                carpeta_p = meta_p.get("carpeta_origen") or "(raíz)"
+
+                row = st.columns([3, 2, 2, 1, 2, 3, 1, 1])
+                activo = "→ " if i == st.session_state.mapeo_idx and st.session_state.en_mapeo else ""
+                row[0].markdown(f"{activo}**{p['filename']}**")
+                row[1].caption(meta_p.get("banco", "—"))
+                row[2].caption(meta_p.get("cuenta", "—"))
+                row[3].caption(p.get("ext", "—").upper())
+                row[4].caption(carpeta_p[:15])
+                row[5].caption(f"⚠ {causa[:55]}" if causa else "—")
+
+                mk = re.sub(r"[^a-zA-Z0-9]", "_", f"map_{i}_{p['filename']}")
+                qk = re.sub(r"[^a-zA-Z0-9]", "_", f"qp_{i}_{p['filename']}")
+
+                if row[6].button("Mapear", key=mk, use_container_width=True):
+                    st.session_state.mapeo_idx = i
+                    st.session_state.en_mapeo  = True
+                    st.rerun()
+                if row[7].button("✕", key=qk, use_container_width=True, help="Quitar de la lista"):
+                    st.session_state.cola_mapeo.pop(i)
+                    remaining = len(st.session_state.cola_mapeo)
+                    if remaining == 0:
+                        st.session_state.en_mapeo = False
+                        st.session_state.mapeo_idx = 0
+                    elif st.session_state.mapeo_idx >= remaining:
+                        st.session_state.mapeo_idx = remaining - 1
+                    st.rerun()
+        else:
+            st.info("Ningún archivo pendiente coincide con los filtros.")
+
+        st.markdown("")
+        col_bt1, col_bt2 = st.columns(2)
+        if col_bt1.button("▶ Mapear primer pendiente", type="primary", use_container_width=True, key="btn_mapear_1"):
+            st.session_state.mapeo_idx = 0
+            st.session_state.en_mapeo  = True
+            st.rerun()
+        if cola_filtrada and col_bt2.button("▶ Mapear el seleccionado", use_container_width=True, key="btn_mapear_sel"):
+            st.session_state.mapeo_idx = cola_filtrada[0][0]
+            st.session_state.en_mapeo  = True
+            st.rerun()
+
+    else:
+        st.success("✓ No hay archivos pendientes de mapeo.")
+
+    st.divider()
+
+    # ── Historial de carga completo ───────────────────────────────────────
+    st.subheader("Historial de carga")
     if not diag:
-        st.info("Procesa archivos para ver el diagnóstico de carga aquí.")
+        st.info("Procesa archivos para ver el historial aquí.")
         return
 
     df_diag = pd.DataFrame(diag)
+
+    # Filtros para el historial
+    hf1, hf2, hf3 = st.columns(3)
+    with hf1:
+        est_opts = ["Todos"] + sorted(df_diag["Estado"].dropna().unique()) if "Estado" in df_diag.columns else ["Todos"]
+        estado_hf = st.selectbox("Estado", est_opts, key="hist_estado_f")
+    with hf2:
+        ban_opts = ["Todos"] + sorted(df_diag["Banco"].dropna().unique()) if "Banco" in df_diag.columns else ["Todos"]
+        banco_hf  = st.selectbox("Banco", ban_opts, key="hist_banco_f")
+    with hf3:
+        tip_opts = ["Todos"] + sorted(df_diag["Tipo"].dropna().unique()) if "Tipo" in df_diag.columns else ["Todos"]
+        tipo_hf   = st.selectbox("Tipo archivo", tip_opts, key="hist_tipo_f")
+
+    df_hist = df_diag.copy()
+    if estado_hf != "Todos" and "Estado" in df_hist.columns:
+        df_hist = df_hist[df_hist["Estado"] == estado_hf]
+    if banco_hf != "Todos" and "Banco" in df_hist.columns:
+        df_hist = df_hist[df_hist["Banco"] == banco_hf]
+    if tipo_hf != "Todos" and "Tipo" in df_hist.columns:
+        df_hist = df_hist[df_hist["Tipo"] == tipo_hf]
 
     def _color_estado(val):
         colors = {
@@ -413,38 +552,40 @@ def render_diagnostico_tab() -> None:
             "Pendiente de OCR":      "background-color: #cce5ff",
             "Pendiente de revisión": "background-color: #e2d9f3",
             "Error":                 "background-color: #f8d7da",
+            "Descartado":            "background-color: #e2e3e5",
         }
         return colors.get(str(val), "")
 
-    if "Estado" in df_diag.columns:
-        styled = df_diag.style.applymap(_color_estado, subset=["Estado"])
+    if "Estado" in df_hist.columns:
+        styled = df_hist.style.applymap(_color_estado, subset=["Estado"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
     else:
-        st.dataframe(df_diag, use_container_width=True, hide_index=True)
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
-    # Resumen por estado
-    if "Estado" in df_diag.columns:
-        counts = df_diag["Estado"].value_counts()
-        cols_resumen = st.columns(len(counts))
-        for i, (estado, n) in enumerate(counts.items()):
-            cols_resumen[i].metric(estado, n)
-
-    st.caption(f"Total: {len(diag)} archivo(s) analizados en esta sesión.")
+    st.caption(f"Mostrando {len(df_hist)} de {len(diag)} entrada(s) en el historial.")
 
 
 def render_main_tabs(df: pd.DataFrame):
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "Vista previa", "Clasificación", "Saldos", "Duplicados", "Exportar", "Diagnóstico",
-    ])
-    with tab1: render_preview(df)
-    with tab2: render_classifier(df)
-    with tab3: render_balances(df)
-    with tab4: render_duplicates(df)
-    with tab5: render_exporter(df)
-    with tab6: render_diagnostico_tab()
+    cola = st.session_state.cola_mapeo
+    n_pend = len(cola)
+
+    tab_labels = ["Vista previa", "Clasificación", "Saldos", "Duplicados", "Exportar"]
+    if n_pend:
+        tab_labels += [f"⚠ Pendientes y Diagnóstico ({n_pend})"]
+    else:
+        tab_labels += ["Diagnóstico"]
+
+    tabs = st.tabs(tab_labels)
+
+    with tabs[0]: render_preview(df)
+    with tabs[1]: render_classifier(df)
+    with tabs[2]: render_balances(df)
+    with tabs[3]: render_duplicates(df)
+    with tabs[4]: render_exporter(df)
+    with tabs[5]: render_pending_tab()
 
 
-def render_mapping_ui(pending: dict):
+def render_mapping_ui(pending: dict, idx: int = 0):
     """
     Pantalla de mapeo manual para un archivo que no se pudo parsear automáticamente.
     """
@@ -455,15 +596,37 @@ def render_mapping_ui(pending: dict):
     diag      = pending["diagnostic"]
     df_raw    = pending["df_raw"]
     meta      = pending.get("metadata", {})
-    total_pendientes = len(st.session_state.cola_mapeo)
+    cola_actual = st.session_state.cola_mapeo
+    n_total   = len(cola_actual)
 
-    st.subheader("Mapeo manual de columnas")
+    # ── Encabezado con navegación ─────────────────────────────────────────
+    col_title, col_nav = st.columns([6, 3])
+    with col_title:
+        st.subheader(f"Mapeo manual del archivo: {filename}")
+    with col_nav:
+        nav1, nav2, nav3 = st.columns(3)
+        if nav1.button("← Anterior", key="nav_prev", use_container_width=True,
+                       disabled=(idx == 0)):
+            st.session_state.mapeo_idx = idx - 1
+            st.rerun()
+        nav2.markdown(
+            f"<div style='text-align:center;padding:6px 0'>"
+            f"<b>{idx + 1}</b> / {n_total}</div>",
+            unsafe_allow_html=True,
+        )
+        if nav3.button("Siguiente →", key="nav_next", use_container_width=True,
+                       disabled=(idx >= n_total - 1)):
+            st.session_state.mapeo_idx = idx + 1
+            st.rerun()
+
+    if st.button("← Volver a la lista de pendientes", key="nav_back"):
+        st.session_state.en_mapeo = False
+        st.rerun()
+
     st.markdown(
         f"El archivo **{filename}** no pudo procesarse automáticamente. "
         "Asigna las columnas para que el sistema pueda leerlo."
     )
-    if total_pendientes > 1:
-        st.caption(f"Archivo 1 de {total_pendientes} pendientes de mapeo.")
 
     if any(meta.get(k) for k in ["empresa", "banco", "cuenta"]):
         st.info(
@@ -601,47 +764,35 @@ def render_mapping_ui(pending: dict):
                 st.session_state.archivos_cargados.append(
                     (filename, parser_name, len(df_std))
                 )
-                st.session_state.cola_mapeo.pop(0)
+                st.session_state.cola_mapeo.pop(idx)
+                remaining = len(st.session_state.cola_mapeo)
+                if remaining == 0:
+                    st.session_state.en_mapeo = False
+                    st.session_state.mapeo_idx = 0
+                elif st.session_state.mapeo_idx >= remaining:
+                    st.session_state.mapeo_idx = remaining - 1
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
 
     with col_skip:
         if st.button("Descartar este archivo", use_container_width=True):
-            st.session_state.cola_mapeo.pop(0)
+            st.session_state.cola_mapeo.pop(idx)
+            # Adjust index after removal
+            remaining = len(st.session_state.cola_mapeo)
+            if remaining == 0:
+                st.session_state.en_mapeo = False
+                st.session_state.mapeo_idx = 0
+            elif st.session_state.mapeo_idx >= remaining:
+                st.session_state.mapeo_idx = remaining - 1
             st.rerun()
 
     if not st.session_state.df_consolidado.empty:
         n = len(st.session_state.df_consolidado)
         st.divider()
         st.caption(
-            f"Ya tienes {n:,} movimientos consolidados de archivos anteriores. "
-            "La vista completa aparecerá cuando termines el mapeo."
+            f"Ya tienes {n:,} movimientos consolidados de archivos anteriores."
         )
-
-    # ── Lista completa de archivos pendientes con opción de quitar ────────
-    cola_actual = st.session_state.cola_mapeo
-    if len(cola_actual) >= 1:
-        st.divider()
-        with st.expander(f"📋 Cola de archivos pendientes — {len(cola_actual)} archivo(s)", expanded=True):
-            st.caption("Puedes quitar cualquier archivo de la lista sin necesidad de mapearlo.")
-            for i, item in enumerate(cola_actual):
-                item_meta  = item.get("metadata", {})
-                item_diag  = item.get("diagnostic", {})
-                causa      = item_diag.get("causa_falla", "")
-                banco_str  = item_meta.get("banco", "")
-                cuenta_str = item_meta.get("cuenta", "")
-                info_str   = " | ".join(p for p in [banco_str, cuenta_str] if p)
-                label      = "→ (en pantalla ahora)" if i == 0 else ""
-
-                col_n, col_i, col_c, col_btn = st.columns([3, 3, 3, 1])
-                col_n.markdown(f"**{item['filename']}** {label}")
-                col_i.caption(info_str or "—")
-                col_c.caption(f"⚠ {causa[:60]}" if causa else "")
-                safe_key = re.sub(r"[^a-zA-Z0-9]", "_", f"quitar_{i}_{item['filename']}")
-                if col_btn.button("Quitar", key=safe_key, use_container_width=True):
-                    st.session_state.cola_mapeo.pop(i)
-                    st.rerun()
 
 
 # ─── Barra lateral ────────────────────────────────────────────────────────────
@@ -862,12 +1013,26 @@ with st.sidebar:
                     [st.session_state.df_consolidado, *nuevos_frames],
                     ignore_index=True,
                 )
-                st.success(f"✓ {len(nuevos_frames)} archivo(s) procesado(s).")
 
-            if necesitan_mapeo:
+            # ── Resumen de carga ──────────────────────────────────────────
+            n_total_proc = len(indiv_uploads) + len(zip_items)
+            n_ok_proc    = len(nuevos_frames)
+            n_pend_proc  = necesitan_mapeo
+            n_err_proc   = len(errores)
+            n_mov_total  = len(st.session_state.df_consolidado)
+
+            st.markdown("**Resumen de carga:**")
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            sc1.metric("Detectados",   n_total_proc)
+            sc2.metric("Procesados",   n_ok_proc)
+            sc3.metric("Pendientes",   n_pend_proc)
+            sc4.metric("Errores",      n_err_proc)
+            sc5.metric("Movimientos",  f"{n_mov_total:,}")
+
+            if n_pend_proc:
                 st.warning(
-                    f"⚠ {necesitan_mapeo} archivo(s) requieren mapeo manual. "
-                    "Revisa el área principal."
+                    f"⚠ {n_pend_proc} archivo(s) requieren mapeo manual. "
+                    "Ve a la pestaña **Pendientes y Diagnóstico**."
                 )
 
             for err in errores:
@@ -885,11 +1050,21 @@ with st.sidebar:
             st.session_state.archivos_cargados = []
             st.session_state.cola_mapeo = []
             st.session_state.diagnostico = []
+            st.session_state.mapeo_idx = 0
+            st.session_state.en_mapeo = False
             st.rerun()
 
     if st.session_state.cola_mapeo:
         n_pend = len(st.session_state.cola_mapeo)
         st.warning(f"⚠ {n_pend} archivo(s) pendientes de mapeo")
+        sb1, sb2 = st.columns(2)
+        if sb1.button("Mapear →", use_container_width=True, key="sb_mapear"):
+            st.session_state.mapeo_idx = 0
+            st.session_state.en_mapeo  = True
+            st.rerun()
+        if sb2.button("Ver lista", use_container_width=True, key="sb_ver_lista"):
+            st.session_state.en_mapeo = False
+            st.rerun()
 
     st.divider()
 
@@ -917,15 +1092,25 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: gestión de cola de mapeo manual")
+st.caption("Versión: filtrado avanzado y gestión de pendientes")
 st.divider()
 
-cola = st.session_state.cola_mapeo
-df   = st.session_state.df_consolidado
+cola      = st.session_state.cola_mapeo
+df        = st.session_state.df_consolidado
+en_mapeo  = st.session_state.get("en_mapeo", False)
+mapeo_idx = st.session_state.get("mapeo_idx", 0)
 
-if cola:
-    render_mapping_ui(cola[0])
-elif not df.empty:
+# Guardar índice en rango
+if cola and mapeo_idx >= len(cola):
+    mapeo_idx = len(cola) - 1
+    st.session_state.mapeo_idx = mapeo_idx
+if not cola:
+    st.session_state.en_mapeo = False
+    en_mapeo = False
+
+if en_mapeo and cola:
+    render_mapping_ui(cola[mapeo_idx], mapeo_idx)
+elif not df.empty or cola:
     render_main_tabs(df)
 elif zip_items:
     render_zip_summary(zip_items)
