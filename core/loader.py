@@ -1,18 +1,23 @@
 """
-Carga de archivos Excel y CSV desde objetos subidos por Streamlit.
+Carga de archivos Excel, CSV y ZIP desde objetos subidos por Streamlit.
 
 Devuelve un LoadInfo con el DataFrame crudo y metadatos de diagnóstico:
 hoja seleccionada, fila de encabezado detectada, hojas disponibles, etc.
 El normalizer decide qué parser usar; el loader sólo lee.
+
+Para archivos ZIP: extrae entradas Excel/CSV con banco y cuenta derivados
+del nombre de carpeta y del nombre de archivo respectivamente.
 """
 
 import io
 import re
+import zipfile
 from dataclasses import dataclass, field
+
 import pandas as pd
 
 
-# ─── Palabras clave para puntuar filas candidatas a encabezado ────────────
+# ─── Palabras clave para puntuar filas candidatas a encabezado ────────
 _HEADER_KEYWORDS = [
     "fecha", "date", "fec", "valor", "operacion", "operación",
     "concepto", "descripcion", "descripción", "glosa", "detalle", "movimiento",
@@ -21,6 +26,43 @@ _HEADER_KEYWORDS = [
     "debe", "haber", "ingreso", "egreso", "retiro", "deposito", "depósito",
     "saldo", "balance", "referencia", "ref", "folio", "comprobante",
 ]
+
+# ─── Aliases de bancos (clave en MAYÚsCULAS, valor = nombre canónico) ────
+_BANK_ALIASES: dict[str, str] = {
+    "BMSCZ":       "Banco Mercantil Santa Cruz",
+    "BMSC":        "Banco Mercantil Santa Cruz",
+    "MERCANTIL":   "Banco Mercantil Santa Cruz",
+    "BNB":         "BNB",
+    "BCP":         "BCP",
+    "BGA":         "Banco Ganadero",
+    "GNA":         "Banco Ganadero",
+    "GANADERO":    "Banco Ganadero",
+    "BISA":        "Banco Bisa",
+    "UNION":       "Banco Unión",
+    "UNIÓN":       "Banco Unión",
+    "BEC":         "Banco Económico",
+    "ECONOMICO":   "Banco Económico",
+    "ECONÓMICO":   "Banco Económico",
+    "FIE":         "Banco FIE",
+    "PRODEM":      "Banco Prodem",
+    "BANCOSOL":    "BancoSol",
+    "CIDRE":       "CIDRE",
+    "CJN":         "CJN",
+    "CONTINENTAL": "Continental",
+}
+
+# Palabras a ignorar al buscar el número de cuenta en el filename
+_IGNORE_IN_FILENAME = re.compile(
+    r"\b(BOB|USD|EUR|Bs|Sus|\$us|Bolivianos|Dólares|Dolares|Euros|"
+    r"Extracto|Historico|Histórico|Estado|Cuenta|Movimientos?|"
+    r"BNB|BCP|BMSCZ?|BISA|UNION|UNIÓN|FIE|PRODEM|CIDRE|CJN|"
+    r"CONTINENTAL|GANADERO|BGA|GNA|MERCANTIL|BEC|ECONOMICO|ECONÓMICO|"
+    r"BANCOSOL)\b",
+    flags=re.IGNORECASE,
+)
+
+# Patrón de fecha (para excluirla del número de cuenta)
+_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}[T\d\.]*")
 
 
 @dataclass
@@ -35,7 +77,157 @@ class LoadInfo:
     raw_bytes: bytes = field(default=b"", repr=False)
 
 
-# ─── Punto de entrada principal ───────────────────────────────────────────
+@dataclass
+class ZipFileEntry:
+    """Metadatos de un archivo individual extraído de un ZIP."""
+    raw_bytes: bytes
+    filename: str       # nombre del archivo (sin ruta)
+    zip_path: str       # ruta completa dentro del ZIP
+    folder: str         # carpeta inmediata padre dentro del ZIP
+    bank: str           # nombre de banco normalizado
+    cuenta: str         # número de cuenta extraído del filename
+    moneda: str         # moneda detectada (BOB / USD / EUR)
+
+
+# ─── Normalización de nombre de banco ───────────────────────────────────
+
+def normalize_bank_name(folder_name: str) -> str:
+    """
+    Convierte el nombre de una carpeta al nombre canónico del banco.
+    Si no reconoce el alias, devuelve el nombre de carpeta tal como está.
+    """
+    key = folder_name.strip().upper()
+    for alias, canonical in _BANK_ALIASES.items():
+        if alias in key:
+            return canonical
+    return folder_name.strip()
+
+
+# ─── Extracción de número de cuenta desde el nombre del archivo ─────────
+
+def extract_account_from_filename(filename: str) -> str:
+    """
+    Intenta detectar el número de cuenta a partir del nombre del archivo.
+    Elimina monedas, bancos y fechas antes de buscar patrones numéricos.
+    Ejemplos:
+      701-504803-2-9.xlsx  →  701-504803-2-9
+      100602748 - Bs.xlsx  →  100602748
+      BCP 701-504803-2-9 USD.xlsx  →  701-504803-2-9
+      ExtractoHistorico - 2026-04-08T190506.868.xls  →  ExtractoHistorico - 2026-04-08T190506.868
+    """
+    name = filename.rsplit(".", 1)[0]
+    clean = _IGNORE_IN_FILENAME.sub("", name)
+    clean = _DATE_PATTERN.sub("", clean).strip(" -_")
+
+    # Patrón con dashes: dígitos-dígitos-... (al menos 5 caracteres totales)
+    m = re.search(r"\d[\d\-]{3,}\d", clean)
+    if m:
+        return m.group(0)
+
+    # Solo dígitos (al menos 5)
+    m = re.search(r"\d{5,}", clean)
+    if m:
+        return m.group(0)
+
+    # Fallback: nombre completo sin extensión
+    return name.strip()
+
+
+# ─── Detección de moneda desde texto ────────────────────────────────────
+
+def detect_moneda_from_name(name: str) -> str | None:
+    """
+    Detecta la moneda a partir del nombre de archivo o carpeta.
+    Devuelve "BOB", "USD", "EUR" o None si no detecta.
+    """
+    n = name.upper()
+    if any(k in n for k in ["USD", "DOLAR", "DOLARES", "DÓLARES", "$US", "SUS"]):
+        return "USD"
+    if any(k in n for k in ["EUR", "EURO", "EUROS"]):
+        return "EUR"
+    if any(k in n for k in ["BOB", " BS", "-BS", "_BS", "BOLIVIANO", "BOLIVIANOS"]):
+        return "BOB"
+    return None
+
+
+# ─── Carga de ZIP ─────────────────────────────────────────────────────────
+
+_SKIP_PARTS = {"__macosx", ".ds_store"}
+_VALID_EXTS = {"xlsx", "xls", "csv"}
+
+
+def load_zip_entries(zip_bytes: bytes) -> list[ZipFileEntry]:
+    """
+    Extrae todas las entradas válidas (Excel/CSV) de un archivo ZIP.
+    - Ignora carpetas, archivos ocultos, temporales y __MACOSX.
+    - Deriva banco desde el nombre de la carpeta padre.
+    - Deriva cuenta y moneda desde el nombre del archivo.
+    """
+    entries: list[ZipFileEntry] = []
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for info in zf.infolist():
+            if info.is_dir() or info.file_size == 0:
+                continue
+
+            path = info.filename.replace("\\", "/")
+            parts = [p for p in path.split("/") if p]
+            basename = parts[-1]
+
+            # Ignorar archivos temporales, ocultos y artefactos de macOS
+            if basename.startswith("~$") or basename.startswith("."):
+                continue
+            if any(p.lower() in _SKIP_PARTS for p in parts):
+                continue
+
+            ext = basename.rsplit(".", 1)[-1].lower() if "." in basename else ""
+            if ext not in _VALID_EXTS:
+                continue
+
+            try:
+                raw = zf.read(info.filename)
+            except Exception:
+                continue
+            if not raw:
+                continue
+
+            folder = parts[-2] if len(parts) >= 2 else ""
+            bank = normalize_bank_name(folder) if folder else "Genérico"
+            cuenta = extract_account_from_filename(basename)
+
+            # Moneda: primero en filename, luego en folder, luego BOB por defecto
+            moneda = (
+                detect_moneda_from_name(basename)
+                or detect_moneda_from_name(folder)
+                or "BOB"
+            )
+
+            entries.append(ZipFileEntry(
+                raw_bytes=raw,
+                filename=basename,
+                zip_path=path,
+                folder=folder,
+                bank=bank,
+                cuenta=cuenta,
+                moneda=moneda,
+            ))
+
+    return entries
+
+
+def load_zip_entry_to_loadinfo(entry: ZipFileEntry) -> LoadInfo:
+    """Convierte un ZipFileEntry en un LoadInfo listo para normalizar."""
+    ext = entry.filename.rsplit(".", 1)[-1].lower()
+    if ext in ("xlsx", "xls"):
+        return _load_excel_smart(entry.raw_bytes, entry.filename, ext)
+    elif ext == "csv":
+        return _load_csv_smart(entry.raw_bytes, entry.filename)
+    else:
+        raise ValueError(f"Formato no soportado: {entry.filename}")
+
+
+# ─── Punto de entrada para archivos individuales ────────────────────────
+
 def load_file(uploaded_file) -> LoadInfo:
     """Lee un archivo subido por Streamlit y devuelve LoadInfo."""
     filename = uploaded_file.name
@@ -61,6 +253,7 @@ def reload_excel(raw_bytes: bytes, filename: str, sheet_name: str, header_row: i
 
 
 # ─── Carga Excel ──────────────────────────────────────────────────────────
+
 def _load_excel_smart(raw_bytes: bytes, filename: str, ext: str) -> LoadInfo:
     buf = io.BytesIO(raw_bytes)
     try:
@@ -110,7 +303,7 @@ def _norm_text(s: str) -> str:
 
 
 def _header_row_score(row: pd.Series) -> int:
-    """Puntúa cuánto se parece una fila a un encabezado de extracto bancario."""
+    """Puntuúa cuánto se parece una fila a un encabezado de extracto bancario."""
     score = 0
     cells = [str(v).strip() for v in row if pd.notna(v) and str(v).strip() not in ("", "nan")]
     if len(cells) < 2:
@@ -125,12 +318,10 @@ def _header_row_score(row: pd.Series) -> int:
                 matched_kw = True
                 break
         if not matched_kw:
-            # Texto no numérico = probablemente encabezado, no dato
             try:
                 float(cell.replace(",", ".").replace(" ", ""))
             except ValueError:
-                score += 1  # texto libre → leve punto positivo
-
+                score += 1
     return score
 
 
@@ -152,7 +343,8 @@ def _detect_header_row(raw_bytes: bytes, sheet_name: str, max_scan: int = 30) ->
     return best_row
 
 
-# ─── Carga CSV ────────────────────────────────────────────────────────────
+# ─── Carga CSV ──────────────────────────────────────────────────────────
+
 def _load_csv_smart(raw_bytes: bytes, filename: str) -> LoadInfo:
     encodings = ["utf-8-sig", "latin-1", "utf-8", "cp1252"]
     separators = [";", ",", "\t", "|"]

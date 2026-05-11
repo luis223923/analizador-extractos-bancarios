@@ -7,7 +7,10 @@ import re
 import streamlit as st
 import pandas as pd
 
-from core.loader import load_file, reload_excel
+from core.loader import (
+    load_file, reload_excel,
+    load_zip_entries, load_zip_entry_to_loadinfo, ZipFileEntry,
+)
 from core.normalizer import normalize, normalize_with_mapping, diagnose, get_registered_banks
 from core.schema import empty_standard_df, MONEDAS, TIPOS_CUENTA, EMPRESAS, BANCOS
 from core.accounts import load_accounts
@@ -43,12 +46,11 @@ def _safe_key(filename: str, size: int) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "_", f"{filename}_{size}")
 
 
-# ─── Detección automática desde nombre de archivo ────────────────────────────
+# ─── Detección automática desde nombre de archivo (archivos individuales) ────
 
 def _detect_bank_from_filename(filename: str) -> str:
-    """Deduce el banco desde el nombre del archivo."""
     name = filename.upper()
-    if any(k in name for k in ["BMSC", "MERCANTIL"]):
+    if any(k in name for k in ["BMSCZ", "BMSC", "MERCANTIL"]):
         return "Banco Mercantil Santa Cruz"
     if "BNB" in name:
         return "BNB"
@@ -68,14 +70,11 @@ def _detect_bank_from_filename(filename: str) -> str:
 
 
 def _detect_moneda_from_filename(filename: str) -> str:
-    """Deduce la moneda desde el nombre del archivo."""
     name = filename.upper()
-    if any(k in name for k in ["USD", "DOLAR", "DOLARES", "$US"]):
+    if any(k in name for k in ["USD", "DOLAR", "DOLARES", "$US", "SUS"]):
         return "USD"
     if any(k in name for k in ["EUR", "EURO", "EUROS"]):
         return "EUR"
-    if any(k in name for k in ["BOB", "BOLIVIANO", "BOLIVIANOS"]):
-        return "BOB"
     return "BOB"
 
 
@@ -87,19 +86,20 @@ def _auto_metadata_from_filename(filename: str, cuentas: list) -> dict:
     banco_auto  = _detect_bank_from_filename(filename)
     moneda_auto = _detect_moneda_from_filename(filename)
 
-    # Buscar coincidencia en el maestro de cuentas (por nombre de banco en el filename)
     for c in cuentas:
         banco_maestro = c.get("banco", "")
         if banco_maestro and banco_maestro.upper() in filename.upper():
             nc = c.get("nombre_corto") or f"{c.get('banco', '')} - {c.get('numero_cuenta', '')}"
             return {
-                "empresa":       c.get("empresa", "Sin definir"),
-                "banco":         c.get("banco", banco_auto),
-                "cuenta":        c.get("numero_cuenta", "No identificada"),
-                "nombre_corto":  nc or "Cuenta no identificada",
-                "moneda":        c.get("moneda", moneda_auto),
-                "tipo_cuenta":   c.get("tipo_cuenta", "Sin definir"),
-                "observaciones": "",
+                "empresa":        c.get("empresa", "Sin definir"),
+                "banco":          c.get("banco", banco_auto),
+                "cuenta":         c.get("numero_cuenta", "No identificada"),
+                "nombre_corto":   nc or "Cuenta no identificada",
+                "moneda":         c.get("moneda", moneda_auto),
+                "tipo_cuenta":    c.get("tipo_cuenta", "Sin definir"),
+                "observaciones":  "",
+                "carpeta_origen": "",
+                "ruta_zip":       "",
             }
 
     nc = (
@@ -108,17 +108,19 @@ def _auto_metadata_from_filename(filename: str, cuentas: list) -> dict:
         else "Cuenta no identificada"
     )
     return {
-        "empresa":       "Sin definir",
-        "banco":         banco_auto,
-        "cuenta":        "No identificada",
-        "nombre_corto":  nc,
-        "moneda":        moneda_auto,
-        "tipo_cuenta":   "Sin definir",
-        "observaciones": "",
+        "empresa":        "Sin definir",
+        "banco":          banco_auto,
+        "cuenta":         "No identificada",
+        "nombre_corto":   nc,
+        "moneda":         moneda_auto,
+        "tipo_cuenta":    "Sin definir",
+        "observaciones":  "",
+        "carpeta_origen": "",
+        "ruta_zip":       "",
     }
 
 
-def _get_file_metadata(filename: str, size: int, cuentas: list) -> dict:
+def _get_file_metadata(filename: str, size: int, cuentas: list, empresa_default: str) -> dict:
     """
     Devuelve metadatos del archivo.
     Si no está en modo edición → auto-detección desde nombre de archivo.
@@ -127,7 +129,9 @@ def _get_file_metadata(filename: str, size: int, cuentas: list) -> dict:
     safe = _safe_key(filename, size)
 
     if not st.session_state.get(f"meta_{safe}_edit", False):
-        return _auto_metadata_from_filename(filename, cuentas)
+        meta = _auto_metadata_from_filename(filename, cuentas)
+        meta["empresa"] = empresa_default
+        return meta
 
     master_key = f"meta_{safe}_master"
     master_sel = st.session_state.get(master_key, "Manual")
@@ -136,37 +140,38 @@ def _get_file_metadata(filename: str, size: int, cuentas: list) -> dict:
     prefix     = f"meta_{safe}_idx{master_idx}"
     auto       = _auto_metadata_from_filename(filename, cuentas)
     return {
-        "empresa":       st.session_state.get(f"{prefix}_empresa",       auto["empresa"]),
-        "banco":         st.session_state.get(f"{prefix}_banco",         auto["banco"]),
-        "cuenta":        st.session_state.get(f"{prefix}_cuenta",        auto["cuenta"]),
-        "nombre_corto":  st.session_state.get(f"{prefix}_nombre_corto",  auto["nombre_corto"]),
-        "moneda":        st.session_state.get(f"{prefix}_moneda",        auto["moneda"]),
-        "tipo_cuenta":   st.session_state.get(f"{prefix}_tipo_cuenta",   auto["tipo_cuenta"]),
-        "observaciones": st.session_state.get(f"{prefix}_observaciones", auto["observaciones"]),
+        "empresa":        st.session_state.get(f"{prefix}_empresa",       empresa_default),
+        "banco":          st.session_state.get(f"{prefix}_banco",         auto["banco"]),
+        "cuenta":         st.session_state.get(f"{prefix}_cuenta",        auto["cuenta"]),
+        "nombre_corto":   st.session_state.get(f"{prefix}_nombre_corto",  auto["nombre_corto"]),
+        "moneda":         st.session_state.get(f"{prefix}_moneda",        auto["moneda"]),
+        "tipo_cuenta":    st.session_state.get(f"{prefix}_tipo_cuenta",   auto["tipo_cuenta"]),
+        "observaciones":  st.session_state.get(f"{prefix}_observaciones", auto["observaciones"]),
+        "carpeta_origen": "",
+        "ruta_zip":       "",
     }
 
 
-def _render_file_metadata_form(f, cuentas: list) -> None:
+def _render_file_metadata_form(f, cuentas: list, empresa_default: str) -> None:
     """
     Muestra un resumen auto-detectado del archivo.
-    Solo si el usuario activa 'Editar datos del extracto' se despliega el formulario completo.
+    El formulario completo aparece solo al activar 'Editar datos detectados'.
     """
     safe = _safe_key(f.name, f.size)
     auto = _auto_metadata_from_filename(f.name, cuentas)
+    auto["empresa"] = empresa_default
 
-    # Resumen automático (siempre visible)
     col_a, col_b, col_c = st.columns(3)
     col_a.caption(f"Banco: **{auto['banco']}**")
     col_b.caption(f"Moneda: **{auto['moneda']}**")
     col_c.caption(f"Empresa: **{auto['empresa']}**")
 
     edit_key  = f"meta_{safe}_edit"
-    show_edit = st.checkbox("Editar datos del extracto", key=edit_key, value=False)
+    show_edit = st.checkbox("Editar datos detectados", key=edit_key, value=False)
 
     if not show_edit:
         return
 
-    # ── Formulario completo (solo si el usuario lo activa) ────────────────
     master_key      = f"meta_{safe}_master"
     nombres_maestro = ["Manual"] + [c.get("nombre_corto", "") for c in cuentas]
 
@@ -190,7 +195,7 @@ def _render_file_metadata_form(f, cuentas: list) -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        emp_def = dv("empresa", "Sin definir")
+        emp_def = dv("empresa", empresa_default)
         emp_idx = EMPRESAS.index(emp_def) if emp_def in EMPRESAS else len(EMPRESAS) - 1
         st.selectbox("Empresa", EMPRESAS, index=emp_idx, key=f"{prefix}_empresa")
         st.text_input("N° Cuenta", value=dv("numero_cuenta", auto["cuenta"]),
@@ -219,9 +224,9 @@ def _apply_metadata_to_df(
     is_excel: bool = False,
 ) -> pd.DataFrame:
     """
-    Enriquece el DataFrame normalizado con los metadatos del usuario:
+    Enriquece el DataFrame normalizado con los metadatos:
     empresa, nombre_corto, moneda, tipo_cuenta, hoja_origen, fila_origen,
-    observaciones, y deriva debito/credito desde importe.
+    carpeta_origen, ruta_zip, observaciones, y deriva debito/credito.
     """
     df = df_std.copy()
 
@@ -232,15 +237,19 @@ def _apply_metadata_to_df(
     if meta.get("cuenta"):
         df["cuenta"] = meta["cuenta"]
 
-    nc = meta.get("nombre_corto") or meta.get("cuenta") or ""
-    if not nc and not df.empty and "cuenta" in df.columns:
-        nc = str(df["cuenta"].iloc[0])
+    nc = meta.get("nombre_corto") or ""
+    if not nc:
+        banco = meta.get("banco") or (str(df["banco"].iloc[0]) if not df.empty else "")
+        cuenta = meta.get("cuenta") or (str(df["cuenta"].iloc[0]) if not df.empty else "")
+        nc = f"{banco} - {cuenta}".strip(" -") if banco or cuenta else "Sin nombre"
     df["nombre_corto"] = nc or "Sin nombre"
 
-    df["moneda"]        = meta.get("moneda") or "BOB"
-    df["tipo_cuenta"]   = meta.get("tipo_cuenta") or "Sin definir"
-    df["observaciones"] = meta.get("observaciones") or ""
-    df["hoja_origen"]   = selected_sheet or ""
+    df["moneda"]         = meta.get("moneda") or "BOB"
+    df["tipo_cuenta"]    = meta.get("tipo_cuenta") or "Sin definir"
+    df["observaciones"]  = meta.get("observaciones") or ""
+    df["hoja_origen"]    = selected_sheet or ""
+    df["carpeta_origen"] = meta.get("carpeta_origen") or ""
+    df["ruta_zip"]       = meta.get("ruta_zip") or ""
 
     fila_base = (header_row + 2) if is_excel else 2
     df["fila_origen"] = [str(fila_base + i) for i in range(len(df))]
@@ -250,6 +259,56 @@ def _apply_metadata_to_df(
     df["credito"] = imp.clip(lower=0.0)
 
     return df
+
+
+# ─── ZIP: parseo de entradas ─────────────────────────────────────────────────────
+
+def _parse_zip_uploads(uploaded_files, empresa_default: str) -> list[dict]:
+    """
+    Para cada archivo ZIP en la lista, extrae sus entradas y devuelve
+    una lista de dicts con: entry (ZipFileEntry), empresa, estado.
+    """
+    result = []
+    for f in uploaded_files:
+        if not f.name.lower().endswith(".zip"):
+            continue
+        try:
+            zip_bytes = f.getvalue()
+            entries = load_zip_entries(zip_bytes)
+            for e in entries:
+                result.append({
+                    "entry":   e,
+                    "empresa": empresa_default,
+                    "estado":  "Listo para procesar",
+                })
+        except Exception as ex:
+            st.warning(f"No se pudo leer el ZIP '{f.name}': {ex}")
+    return result
+
+
+# ─── Renderizado de la tabla resumen del ZIP ──────────────────────────────────────────
+
+def render_zip_summary(zip_items: list[dict]) -> None:
+    st.subheader("Archivos detectados en el ZIP")
+    st.caption(
+        f"Se encontraron **{len(zip_items)}** archivos procesables. "
+        "Revisa los datos y pulsa **Procesar archivos** en el panel lateral."
+    )
+
+    rows = []
+    for item in zip_items:
+        e: ZipFileEntry = item["entry"]
+        rows.append({
+            "Archivo":          e.filename,
+            "Carpeta origen":   e.folder or "(raíz)",
+            "Banco detectado":  e.bank,
+            "Cuenta detectada": e.cuenta,
+            "Moneda detectada": e.moneda,
+            "Empresa aplicada": item["empresa"],
+            "Estado":           item["estado"],
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 # ─── Funciones de renderizado ─────────────────────────────────────────────────
@@ -263,14 +322,38 @@ def render_welcome():
         analiza movimientos y prepara informes de Tesorería, **sin instalar nada**.
 
         **Cómo empezar:**
-        1. Sube uno o varios archivos Excel o CSV en el panel lateral.
-        2. Completa los **datos del extracto** (empresa, banco, cuenta, moneda).
+        1. Selecciona la **empresa** en el panel lateral.
+        2. Sube uno o varios archivos Excel, CSV **o un ZIP** con carpetas por banco.
         3. Pulsa **Procesar archivos**.
         4. Si el sistema reconoce el formato → los datos aparecen de inmediato.
         5. Si no lo reconoce → verás una pantalla de mapeo para asignar columnas.
         """
     )
-    with st.expander("¿Qué estructura debe tener mi archivo?"):
+    with st.expander("¿Cómo organizar el ZIP?"):
+        st.markdown(
+            """
+            Crea un ZIP con una carpeta por banco y los extractos dentro:
+
+            ```
+            extractos.zip
+            ├── BCP/
+            │   ├── 701-504803-2-9.xlsx
+            │   └── 701-504803-3-7.xlsx
+            ├── BNB/
+            │   └── 15539286.xlsx
+            ├── BMSCZ/
+            │   ├── 100602748 - Bs.xlsx
+            │   └── 100602749 - USD.xlsx
+            └── UNION/
+                └── 2009866.xlsx
+            ```
+
+            - El **nombre de la carpeta** se usa como banco (BCP, BNB, BMSCZ, UNION…).
+            - El **nombre del archivo** se usa como número de cuenta.
+            - La **moneda** se detecta desde el nombre (Bs=BOB, USD, EUR).
+            """
+        )
+    with st.expander("¿Qué estructura debe tener cada archivo?"):
         st.markdown(
             """
             El sistema detecta automáticamente las columnas. Acepta nombres como:
@@ -284,9 +367,6 @@ def render_welcome():
             | Crédito | Crédito, Haber, Abono, Ingreso, Depósito, Credit… |
             | Saldo | Saldo, Balance, Saldo Disponible, Saldo Contable… |
             | Referencia | Referencia, Folio, Voucher, N° Op., Comprobante… |
-
-            Si el archivo tiene encabezados en filas inferiores o varias hojas,
-            el sistema los detecta automáticamente.
             """
         )
 
@@ -474,43 +554,68 @@ with st.sidebar:
     st.caption("Herramienta de Tesorería")
     st.divider()
 
+    # ── Empresa por defecto ─────────────────────────────────────────────
+    empresa_default = st.selectbox(
+        "Empresa por defecto",
+        EMPRESAS,
+        index=EMPRESAS.index("Sin definir"),
+        key="empresa_default",
+        help="Se aplica automáticamente a todos los archivos cargados.",
+    )
+
+    st.divider()
     st.subheader("Cargar extractos")
     uploaded_files = st.file_uploader(
         "Selecciona archivos",
-        type=["xlsx", "xls", "csv"],
+        type=["xlsx", "xls", "csv", "zip"],
         accept_multiple_files=True,
-        help="Formatos soportados: Excel (.xlsx, .xls) y CSV (.csv)",
+        help="Formatos: Excel (.xlsx, .xls), CSV (.csv) o ZIP con carpetas por banco.",
     )
+
+    # Separar ZIPs de archivos individuales
+    zip_uploads    = [f for f in (uploaded_files or []) if f.name.lower().endswith(".zip")]
+    indiv_uploads  = [f for f in (uploaded_files or []) if not f.name.lower().endswith(".zip")]
+
+    # Parsear entradas de todos los ZIPs subidos
+    zip_items: list[dict] = _parse_zip_uploads(zip_uploads, empresa_default)
 
     if uploaded_files:
         cuentas = load_accounts()
-        st.markdown("---")
-        st.markdown("**Datos de los extractos**")
-        if cuentas:
-            st.caption("Carga desde el maestro o completa manualmente.")
-        else:
-            st.caption("Completa los datos de cada archivo antes de procesar.")
 
-        for f in uploaded_files:
-            with st.expander(f"\U0001f4c4 {f.name}", expanded=True):
-                if cuentas:
-                    st.caption("Maestro de cuentas:")
-                _render_file_metadata_form(f, cuentas)
+        # Formularios por archivo individual
+        if indiv_uploads:
+            st.markdown("---")
+            st.markdown("**Datos de los extractos**")
+            if cuentas:
+                st.caption("Carga desde el maestro o edita manualmente.")
+            for f in indiv_uploads:
+                with st.expander(f"\U0001f4c4 {f.name}", expanded=True):
+                    _render_file_metadata_form(f, cuentas, empresa_default)
+
+        # Resumen de ZIPs
+        if zip_items:
+            st.markdown("---")
+            n_zip = len(zip_items)
+            st.markdown(f"**ZIP:** {n_zip} archivo(s) detectado(s)")
+            st.caption("Revisa la tabla en el área principal.")
 
         st.markdown("---")
         if st.button("Procesar archivos", type="primary", use_container_width=True):
+            cuentas = load_accounts()
             nuevos_frames = []
             errores = []
             necesitan_mapeo = 0
 
+            total = len(indiv_uploads) + len(zip_items)
             progress = st.progress(0, text="Leyendo archivos…")
-            for i, f in enumerate(uploaded_files):
-                progress.progress(
-                    (i + 1) / len(uploaded_files),
-                    text=f"Procesando {f.name}…",
-                )
+            step = 0
+
+            # ── Archivos individuales ─────────────────────────────────────────
+            for f in indiv_uploads:
+                step += 1
+                progress.progress(step / total, text=f"Procesando {f.name}…")
                 try:
-                    meta = _get_file_metadata(f.name, f.size, cuentas)
+                    meta = _get_file_metadata(f.name, f.size, cuentas, empresa_default)
                     info = load_file(f)
                     resultado = normalize(info.df_raw, info.filename)
 
@@ -543,6 +648,58 @@ with st.sidebar:
 
                 except ValueError as e:
                     errores.append(f"**{f.name}**: {e}")
+
+            # ── Entradas del ZIP ─────────────────────────────────────────────
+            for item in zip_items:
+                entry: ZipFileEntry = item["entry"]
+                step += 1
+                progress.progress(step / total, text=f"Procesando {entry.filename}…")
+                try:
+                    meta = {
+                        "empresa":        item["empresa"],
+                        "banco":          entry.bank,
+                        "cuenta":         entry.cuenta,
+                        "nombre_corto":   f"{entry.bank} - {entry.cuenta}",
+                        "moneda":         entry.moneda,
+                        "tipo_cuenta":    "Sin definir",
+                        "observaciones":  "",
+                        "carpeta_origen": entry.folder,
+                        "ruta_zip":       entry.zip_path,
+                    }
+                    info = load_zip_entry_to_loadinfo(entry)
+                    resultado = normalize(info.df_raw, info.filename)
+
+                    if resultado is not None:
+                        df_std, parser_name = resultado
+                        df_std = _apply_metadata_to_df(
+                            df_std, meta,
+                            selected_sheet=info.selected_sheet,
+                            header_row=info.header_row,
+                            is_excel=info.ext in ("xlsx", "xls"),
+                        )
+                        nuevos_frames.append(df_std)
+                        st.session_state.archivos_cargados.append(
+                            (entry.zip_path, parser_name, len(df_std))
+                        )
+                    else:
+                        diag = diagnose(info.df_raw)
+                        st.session_state.cola_mapeo.append({
+                            "filename":       entry.filename,
+                            "raw_bytes":      entry.raw_bytes,
+                            "ext":            entry.filename.rsplit(".", 1)[-1].lower(),
+                            "sheets":         info.sheets,
+                            "selected_sheet": info.selected_sheet,
+                            "header_row":     info.header_row,
+                            "df_raw":         info.df_raw,
+                            "diagnostic":     diag,
+                            "metadata":       meta,
+                        })
+                        necesitan_mapeo += 1
+
+                except ValueError as e:
+                    errores.append(f"**{entry.zip_path}**: {e}")
+                except Exception as e:
+                    errores.append(f"**{entry.zip_path}**: Error inesperado — {e}")
 
             progress.empty()
 
@@ -605,7 +762,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: carga simplificada con datos automáticos")
+st.caption("Versión: carga ZIP por banco y cuenta automática")
 st.divider()
 
 cola = st.session_state.cola_mapeo
@@ -615,5 +772,7 @@ if cola:
     render_mapping_ui(cola[0])
 elif not df.empty:
     render_main_tabs(df)
+elif zip_items:
+    render_zip_summary(zip_items)
 else:
     render_welcome()

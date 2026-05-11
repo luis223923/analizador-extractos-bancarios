@@ -21,38 +21,42 @@ _CORE_COLUMNS = [
 
 # Columnas extendidas añadidas por app.py con los metadatos del usuario
 _EXTENDED_COLUMNS = [
-    "empresa",      # str       — empresa propietaria de la cuenta
-    "nombre_corto", # str       — alias corto de la cuenta (ej. "BNB Cte BOB")
-    "moneda",       # str       — código de moneda: BOB, USD, EUR, Sin definir
-    "tipo_cuenta",  # str       — Corriente, Ahorro, Vista, Plazo Fijo, Otra
-    "debito",       # float     — valor absoluto del egreso (>= 0)
-    "credito",      # float     — valor absoluto del ingreso (>= 0)
-    "hoja_origen",  # str       — hoja del Excel de origen
-    "fila_origen",  # str       — fila aproximada en el archivo de origen
-    "observaciones",# str       — notas libres
+    "empresa",       # str       — empresa propietaria de la cuenta
+    "nombre_corto",  # str       — alias corto de la cuenta (ej. "BNB Cte BOB")
+    "moneda",        # str       — código de moneda: BOB, USD, EUR, Sin definir
+    "tipo_cuenta",   # str       — Corriente, Ahorro, Vista, Plazo Fijo, Otra
+    "debito",        # float     — valor absoluto del egreso (>= 0)
+    "credito",       # float     — valor absoluto del ingreso (>= 0)
+    "hoja_origen",   # str       — hoja del Excel de origen
+    "fila_origen",   # str       — fila aproximada en el archivo de origen
+    "carpeta_origen",# str       — carpeta dentro del ZIP de origen
+    "ruta_zip",      # str       — ruta completa dentro del ZIP
+    "observaciones", # str       — notas libres
 ]
 
 # Esquema completo del sistema
 STANDARD_COLUMNS = _CORE_COLUMNS + _EXTENDED_COLUMNS
 
 COLUMN_DTYPES = {
-    "fecha":        "datetime64[ns]",
-    "descripcion":  "object",
-    "importe":      "float64",
-    "saldo":        "float64",
-    "referencia":   "object",
-    "banco":        "object",
-    "cuenta":       "object",
-    "archivo":      "object",
-    "empresa":      "object",
-    "nombre_corto": "object",
-    "moneda":       "object",
-    "tipo_cuenta":  "object",
-    "debito":       "float64",
-    "credito":      "float64",
-    "hoja_origen":  "object",
-    "fila_origen":  "object",
-    "observaciones":"object",
+    "fecha":          "datetime64[ns]",
+    "descripcion":    "object",
+    "importe":        "float64",
+    "saldo":          "float64",
+    "referencia":     "object",
+    "banco":          "object",
+    "cuenta":         "object",
+    "archivo":        "object",
+    "empresa":        "object",
+    "nombre_corto":   "object",
+    "moneda":         "object",
+    "tipo_cuenta":    "object",
+    "debito":         "float64",
+    "credito":        "float64",
+    "hoja_origen":    "object",
+    "fila_origen":    "object",
+    "carpeta_origen": "object",
+    "ruta_zip":       "object",
+    "observaciones":  "object",
 }
 
 # Opciones de moneda disponibles
