@@ -9,7 +9,7 @@ la interfaz de mapeo manual en lugar de un mensaje de error.
 import pandas as pd
 from banks.base import BankParser
 from banks.bbva import BBVAParser
-from banks.generic import GenericParser, detect_columns, parse_with_mapping
+from banks.generic import GenericParser, detect_columns, parse_with_mapping, _parse_single_number
 from core.schema import validate_standard_df
 
 # Registro central — añadir importaciones de nuevos bancos aquí
@@ -51,33 +51,146 @@ def normalize_with_mapping(
     Normaliza usando un mapeo manual de columnas definido por el usuario.
 
     mapping keys: fecha, descripcion, debito, credito, importe, saldo, referencia, cuenta
-    Raises ValueError si el resultado está vacío o es inválido.
+    Raises ValueError con causa específica si el resultado está vacío o es inválido.
     """
     df_std = parse_with_mapping(df_raw, mapping, filename, bank_name="Manual")
     errors = validate_standard_df(df_std)
     if errors:
         raise ValueError(f"Error en el mapeo: {errors}")
     if df_std.empty:
-        raise ValueError(
-            "El mapeo no produjo movimientos válidos. "
-            "Verifica que la columna de Fecha contenga fechas reales "
-            "y la de importe contenga números."
-        )
+        causa = _diagnose_empty_result(df_raw, mapping)
+        raise ValueError(causa)
     return df_std, "Manual"
+
+
+def _diagnose_empty_result(df_raw: pd.DataFrame, mapping: dict) -> str:
+    """Determina la causa concreta por la que parse_with_mapping devolvió 0 filas."""
+    from utils.text_cleaning import parse_date
+
+    if df_raw.empty:
+        return "La hoja parece vacía — no se encontraron filas de datos."
+
+    col_fecha = mapping.get("fecha")
+    col_deb   = mapping.get("debito")
+    col_cred  = mapping.get("credito")
+    col_imp   = mapping.get("importe")
+
+    # Verificar fechas
+    if col_fecha and col_fecha in df_raw.columns:
+        fechas = pd.to_datetime(
+            df_raw[col_fecha].apply(parse_date), errors="coerce"
+        )
+        n_fecha = int(fechas.notna().sum())
+        if n_fecha == 0:
+            sample = df_raw[col_fecha].dropna().head(3).tolist()
+            return (
+                f"No se encontraron fechas válidas en la columna '{col_fecha}'. "
+                f"Muestra de valores: {sample}. "
+                "Prueba con otra columna o ajusta la fila de encabezado."
+            )
+    else:
+        return "No se seleccionó una columna de Fecha válida."
+
+    # Verificar importes
+    has_valid_amount = False
+    for col in [col_deb, col_cred, col_imp]:
+        if col and col in df_raw.columns:
+            parsed = df_raw[col].apply(_parse_single_number)
+            if parsed.notna().any():
+                has_valid_amount = True
+                break
+
+    if not has_valid_amount:
+        cols_usadas = [c for c in [col_deb, col_cred, col_imp] if c]
+        return (
+            f"No se encontraron montos válidos en las columnas {cols_usadas}. "
+            "Verifica que contengan números (acepta formatos 1.234,56 y 1,234.56)."
+        )
+
+    n_total = len(df_raw)
+    return (
+        f"El encabezado fue detectado pero las {n_total} filas de datos quedaron vacías "
+        "tras filtrar por fecha válida. "
+        "Revisa la fila de encabezado seleccionada o el separador del archivo."
+    )
 
 
 def diagnose(df_raw: pd.DataFrame) -> dict:
     """
-    Devuelve información de diagnóstico sobre un DataFrame crudo.
-    Usado por la UI de mapeo manual para mostrar qué se detectó y qué falta.
+    Devuelve información de diagnóstico detallada sobre un DataFrame crudo.
+    Incluye estadísticas de parsing para facilitar la resolución de problemas.
     """
+    from utils.text_cleaning import parse_date
+
     detected = detect_columns(df_raw)
+
+    n_total = len(df_raw)
+    n_all_empty = int(df_raw.apply(
+        lambda row: row.isna().all() or (row.astype(str).str.strip() == "").all(), axis=1
+    ).sum())
+
+    # Estadísticas de fechas
+    col_fecha = detected.get("fecha")
+    n_fecha_valida = 0
+    if col_fecha and col_fecha in df_raw.columns:
+        fechas = pd.to_datetime(df_raw[col_fecha].apply(parse_date), errors="coerce")
+        n_fecha_valida = int(fechas.notna().sum())
+
+    # Estadísticas de importes
+    n_debito_valido  = 0
+    n_credito_valido = 0
+    n_importe_valido = 0
+    for key, counter in [("debito", "n_debito_valido"), ("credito", "n_credito_valido"), ("importe", "n_importe_valido")]:
+        col = detected.get(key)
+        if col and col in df_raw.columns:
+            parsed = df_raw[col].apply(_parse_single_number)
+            val = int(parsed.notna().sum())
+            if key == "debito":   n_debito_valido = val
+            elif key == "credito": n_credito_valido = val
+            else: n_importe_valido = val
+
+    # Intento de parseo real para contar movimientos
+    n_movimientos = 0
+    causa_falla = ""
+    col_deb = detected.get("debito")
+    col_cred = detected.get("credito")
+    col_imp = detected.get("importe")
+    has_amount = any(detected.get(k) for k in ("importe", "debito", "credito"))
+
+    if col_fecha and has_amount:
+        try:
+            df_try = parse_with_mapping(df_raw, detected, "_diagnose_")
+            n_movimientos = len(df_try)
+        except Exception:
+            n_movimientos = 0
+
+    if n_movimientos == 0:
+        if n_total == 0:
+            causa_falla = "La hoja parece vacía"
+        elif not col_fecha:
+            causa_falla = "No se detectó columna de Fecha"
+        elif n_fecha_valida == 0:
+            causa_falla = "No se encontraron fechas válidas en la columna detectada"
+        elif not has_amount:
+            causa_falla = "No se detectó columna de Débito, Crédito ni Importe"
+        elif n_debito_valido == 0 and n_credito_valido == 0 and n_importe_valido == 0:
+            causa_falla = "No se encontraron débitos/créditos válidos"
+        else:
+            causa_falla = "Encabezado detectado pero filas de datos vacías tras filtrado"
+
     return {
-        "columnas_disponibles": list(df_raw.columns),
-        "columnas_detectadas": {k: v for k, v in detected.items() if v is not None},
-        "columnas_faltantes":  [k for k, v in detected.items() if v is None],
-        "n_filas": len(df_raw),
-        "muestra": df_raw.head(10),
+        "columnas_disponibles":       list(df_raw.columns),
+        "columnas_detectadas":        {k: v for k, v in detected.items() if v is not None},
+        "columnas_faltantes":         [k for k, v in detected.items() if v is None],
+        "n_filas":                    n_total,
+        "n_filas_vacias":             n_all_empty,
+        "n_fecha_valida":             n_fecha_valida,
+        "n_debito_valido":            n_debito_valido,
+        "n_credito_valido":           n_credito_valido,
+        "n_importe_valido":           n_importe_valido,
+        "n_movimientos_estimados":    n_movimientos,
+        "causa_falla":                causa_falla,
+        "muestra":                    df_raw.head(10),
     }
 
 

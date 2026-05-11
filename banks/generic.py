@@ -4,6 +4,10 @@ Parser genérico con auto-detección avanzada de columnas.
 Detecta columnas por palabras clave (español, inglés y variantes bancarias
 de Latinoamérica y España). Soporta tanto columna única de Importe como
 columnas separadas de Débito y Crédito.
+
+Lógica de importe: Importe = Crédito - Débito (valores absolutos en la fuente).
+Solo se descartan filas sin fecha válida; filas con importe 0 o indeterminado
+se conservan.
 """
 
 import re
@@ -29,6 +33,8 @@ _DESC_HINTS = [
     "descripcion movimiento", "descripcion operacion", "concepto operacion",
     "motivo", "description", "details", "narrative", "particulars", "memo",
     "denominacion", "denominación", "nombre operacion",
+    "tipo transac", "tipo transaccion", "tipo movimiento", "tipo operacion",
+    "tipo dep", "tipo deposito",
 ]
 _HORA_HINTS = [
     "hora", "time", "hour", "hh:mm", "hora operacion", "hora mov",
@@ -38,11 +44,14 @@ _BENEFICIARIO_HINTS = [
     "beneficiario", "ordenante", "remitente", "destinatario",
     "nombre beneficiario", "nombre ordenante", "pagador", "receptor",
     "beneficiary", "payee", "payer", "counterpart", "contraparte",
+    "originador", "nom destinatario", "nombre destinatario",
+    "nombre denominacion depositante", "denominacion depositante",
+    "nombre depositante", "depositante",
 ]
 _SUCURSAL_HINTS = [
     "sucursal", "agencia", "canal", "oficina", "branch",
     "punto atencion", "punto de atención", "canal origen",
-    "terminal", "cajero", "atm",
+    "terminal", "cajero", "atm", "ciudad origen", "ciudad",
 ]
 _IMPORTE_HINTS = [
     "importe", "monto", "cantidad", "amount",
@@ -77,6 +86,10 @@ _REF_HINTS = [
     "codigo", "código", "folio", "numero transaccion", "transaction id",
     "voucher", "comprobante", "nro comprobante", "id transaccion",
     "numero documento", "num documento", "nro documento",
+    # Columnas específicas de bancos bolivianos
+    "cod bca", "codbca", "cod.bca", "nro cheque", "nrocheque",
+    "cod dep", "coddep", "num doc", "num doc depositante",
+    "originador ach", "originadorach", "nro planilla", "nro nom planilla",
 ]
 _CUENTA_HINTS = [
     "cuenta", "iban", "nº cuenta", "num cuenta", "numero cuenta",
@@ -92,29 +105,36 @@ def _norm(s: str) -> str:
 def find_column(columns: list, hints: list, exclude: set = None) -> str | None:
     """
     Devuelve la columna cuyo nombre mejor coincide con los hints dados.
+    Los hints al inicio de la lista tienen mayor prioridad.
     Excluye columnas ya asignadas a otros campos.
     """
     exclude = exclude or set()
     norm_hints = [_norm(h) for h in hints]
-    candidates = [(_norm(c), c) for c in columns if c not in exclude]
+    candidates = [c for c in columns if c not in exclude]
+    norm_cands  = {c: _norm(c) for c in candidates}
 
-    # 1. Coincidencia exacta normalizada
-    for nc, orig in candidates:
-        if nc in norm_hints:
-            return orig
+    # 1. Coincidencia exacta normalizada — itera hints en orden de prioridad
+    for nh in norm_hints:
+        for c in candidates:
+            if norm_cands[c] == nh:
+                return c
 
     # 2. El hint está contenido en el nombre de columna
-    for nc, orig in candidates:
-        for nh in norm_hints:
-            if len(nh) >= 3 and nh in nc:
-                return orig
+    for nh in norm_hints:
+        if len(nh) < 3:
+            continue
+        for c in candidates:
+            if nh in norm_cands[c]:
+                return c
 
     # 3. El nombre de columna está contenido en el hint
-    for nc, orig in candidates:
-        if len(nc) >= 3:
-            for nh in norm_hints:
-                if nc in nh:
-                    return orig
+    for c in candidates:
+        nc = norm_cands[c]
+        if len(nc) < 3:
+            continue
+        for nh in norm_hints:
+            if nc in nh:
+                return c
 
     return None
 
@@ -153,21 +173,20 @@ def detect_columns(df: pd.DataFrame) -> dict:
 # ─── Limpieza de números ──────────────────────────────────────────────────
 def _parse_single_number(raw) -> float:
     """
-    Convierte un valor textual a float, manejando formatos europeos y anglosajones:
-      - Europeo:       1.234,56  →  1234.56
-      - Anglosajón:    1,234.56  →  1234.56
-      - Simple:        1234,56   →  1234.56  /  1234.56
-      - Negativo:      (1234,56) →  -1234.56  /  1234,56- → -1234.56
-      - Con símbolo:   € 1.234,56  →  1234.56
+    Convierte un valor textual a float, manejando formatos europeos y anglosajones.
+    Devuelve NaN para valores vacíos, guiones, texto no numérico.
+    Devuelve 0.0 para ceros explícitos ("0", "0.00", "0,00").
     """
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return float("nan")
     s = str(raw).strip()
-    if not s or s.lower() in ("nan", "none", "n/a", "", "-", "—", "#"):
+    if not s or s.lower() in ("nan", "none", "n/a", "", "-", "—", "#", " "):
         return float("nan")
 
     # Limpiar símbolos de moneda, espacios y no-breaking spaces
-    s = re.sub(r"[$€£ \s]", "", s)
+    s = re.sub(r"[$€£Bs\s\xa0]", "", s)
+    if not s:
+        return float("nan")
 
     # Detectar negativos: paréntesis (1234) o guión final 1234-
     negative = False
@@ -193,36 +212,27 @@ def _parse_single_number(raw) -> float:
 
         elif n_dots == 0 and n_commas == 1:
             after = s.split(",")[1]
-            # Si hay exactamente 3 dígitos tras la coma → separador de miles
             if len(after) == 3 and after.isdigit():
                 result = float(s.replace(",", ""))
             else:
-                # Decimal europeo: "1234,56"
                 result = float(s.replace(",", "."))
 
         elif n_dots == 1 and n_commas == 0:
-            # US decimal: "1234.56"  (si 3 cifras tras punto podría ser miles, pero
-            # en extractos bancarios preferimos interpretarlo como decimal)
             result = float(s)
 
         elif n_dots == 1 and n_commas == 1:
-            # Determinar cuál es miles y cuál es decimal según posición
             if s.rindex(",") > s.rindex("."):
-                # "1.234,56" → europeo
                 result = float(s.replace(".", "").replace(",", "."))
             else:
-                # "1,234.56" → anglosajón
                 result = float(s.replace(",", ""))
 
         elif n_dots > 1 and n_commas <= 1:
-            # "1.234.567,89"
             if n_commas == 1 and s.rindex(",") > s.rindex("."):
                 result = float(s.replace(".", "").replace(",", "."))
             else:
                 result = float(s.replace(".", ""))
 
         elif n_commas > 1 and n_dots <= 1:
-            # "1,234,567.89"
             if n_dots == 1 and s.rindex(".") > s.rindex(","):
                 result = float(s.replace(",", ""))
             else:
@@ -255,7 +265,6 @@ def _resolve_importe(df: pd.DataFrame, col_deb, col_cred, col_imp) -> pd.Series:
         # Si todo positivo pero hay columnas de débito/crédito, inferimos signo
         if col_deb or col_cred:
             result = _merge_deb_cred(df, col_deb, col_cred)
-            # Donde no hay débito/crédito, usamos el importe tal cual
             no_dc = result.isna()
             result[no_dc] = raw[no_dc]
             return result
@@ -268,15 +277,29 @@ def _resolve_importe(df: pd.DataFrame, col_deb, col_cred, col_imp) -> pd.Series:
 
 
 def _merge_deb_cred(df: pd.DataFrame, col_deb, col_cred) -> pd.Series:
-    result = pd.Series(float("nan"), index=df.index, dtype=float)
-    if col_cred:
-        cred = _clean_series(df[col_cred])
-        mask = cred.notna() & (cred != 0)
-        result[mask] = cred[mask].abs()
-    if col_deb:
-        deb = _clean_series(df[col_deb])
-        mask = deb.notna() & (deb != 0)
-        result[mask] = -deb[mask].abs()
+    """
+    Calcula Importe = Crédito - Débito (ambos son valores absolutos >= 0 en
+    los extractos bancarios).
+
+    - Ingreso: Crédito > 0, Débito = 0  →  importe positivo
+    - Egreso:  Débito > 0, Crédito = 0  →  importe negativo
+    - Cero:    ambos = 0                 →  importe = 0.0 (fila conservada)
+    - Sin dato: ambos NaN               →  importe = NaN (fila conservada si fecha válida)
+    """
+    nan_s = pd.Series(float("nan"), index=df.index, dtype=float)
+
+    cred_raw = _clean_series(df[col_cred]) if col_cred else nan_s.copy()
+    deb_raw  = _clean_series(df[col_deb])  if col_deb  else nan_s.copy()
+
+    # Filas donde al menos una columna tiene un número válido (incluyendo 0.0)
+    either_valid = cred_raw.notna() | deb_raw.notna()
+
+    # Importe = crédito - débito (NaN se trata como 0 cuando la otra columna es válida)
+    cred_filled = cred_raw.fillna(0.0)
+    deb_filled  = deb_raw.fillna(0.0)
+
+    result = nan_s.copy()
+    result[either_valid] = cred_filled[either_valid].abs() - deb_filled[either_valid].abs()
     return result
 
 
@@ -293,8 +316,11 @@ def parse_with_mapping(
     mapping keys: fecha, descripcion, debito, credito, importe, saldo,
                   referencia, cuenta, hora, beneficiario, sucursal
     Los valores son nombres de columna del df o None para ignorar.
+
+    Solo se descartan filas sin fecha válida.  Las filas con importe 0 o NaN
+    (pero fecha válida) se conservan en el resultado.
     """
-    from utils.text_cleaning import extract_time
+    from utils.text_cleaning import extract_time, parse_date
 
     col_fecha        = mapping.get("fecha")
     col_desc         = mapping.get("descripcion")
@@ -317,7 +343,12 @@ def parse_with_mapping(
         )
 
     out = empty_standard_df()
-    out["fecha"]       = pd.to_datetime(df[col_fecha], dayfirst=True, errors="coerce")
+
+    # Fecha: parsing robusto multi-formato
+    out["fecha"] = pd.to_datetime(
+        df[col_fecha].apply(parse_date), errors="coerce"
+    )
+
     out["descripcion"] = df[col_desc].astype(str).str.strip() if col_desc else "Sin descripción"
     out["importe"]     = _resolve_importe(df, col_debito, col_credito, col_importe)
     out["saldo"]       = _clean_series(df[col_saldo])   if col_saldo  else pd.NA
@@ -326,7 +357,7 @@ def parse_with_mapping(
     out["cuenta"]      = df[col_cuenta].astype(str).str.strip() if col_cuenta else pd.NA
     out["archivo"]     = filename
 
-    # Campos opcionales de la nueva cabecera estándar
+    # Campos opcionales de la cabecera estándar
     if col_hora:
         out["hora"] = df[col_hora].astype(str).str.strip()
     else:
@@ -337,7 +368,8 @@ def parse_with_mapping(
     if col_sucursal:
         out["sucursal"] = df[col_sucursal].astype(str).str.strip()
 
-    return out.dropna(subset=["fecha", "importe"])
+    # Solo se descartan filas sin fecha válida; el importe puede ser 0 o NaN
+    return out.dropna(subset=["fecha"])
 
 
 # ─── Clase BankParser ─────────────────────────────────────────────────────

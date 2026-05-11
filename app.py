@@ -397,7 +397,7 @@ def render_welcome():
 
 
 def render_diagnostico_tab() -> None:
-    """Tabla de diagnóstico de todos los archivos procesados en la sesión."""
+    """Tabla de diagnóstico detallado de todos los archivos procesados en la sesión."""
     st.subheader("Diagnóstico de carga")
     diag = st.session_state.get("diagnostico", [])
     if not diag:
@@ -408,15 +408,27 @@ def render_diagnostico_tab() -> None:
 
     def _color_estado(val):
         colors = {
-            "OK":               "background-color: #d4edda",
-            "Mapeo manual":     "background-color: #fff3cd",
-            "Pendiente de OCR": "background-color: #cce5ff",
-            "Error":            "background-color: #f8d7da",
+            "OK":                    "background-color: #d4edda",
+            "Mapeo manual":          "background-color: #fff3cd",
+            "Pendiente de OCR":      "background-color: #cce5ff",
+            "Pendiente de revisión": "background-color: #e2d9f3",
+            "Error":                 "background-color: #f8d7da",
         }
         return colors.get(str(val), "")
 
-    styled = df_diag.style.applymap(_color_estado, subset=["Estado"])
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    if "Estado" in df_diag.columns:
+        styled = df_diag.style.applymap(_color_estado, subset=["Estado"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(df_diag, use_container_width=True, hide_index=True)
+
+    # Resumen por estado
+    if "Estado" in df_diag.columns:
+        counts = df_diag["Estado"].value_counts()
+        cols_resumen = st.columns(len(counts))
+        for i, (estado, n) in enumerate(counts.items()):
+            cols_resumen[i].metric(estado, n)
+
     st.caption(f"Total: {len(diag)} archivo(s) analizados en esta sesión.")
 
 
@@ -502,6 +514,16 @@ def render_mapping_ui(pending: dict):
         col_d1, col_d2 = st.columns(2)
         with col_d1:
             st.write(f"**Filas leídas:** {diag['n_filas']}")
+            st.write(f"**Filas completamente vacías:** {diag.get('n_filas_vacias', '—')}")
+            st.write(f"**Filas con fecha válida:** {diag.get('n_fecha_valida', '—')}")
+            n_deb = diag.get('n_debito_valido', 0)
+            n_cred = diag.get('n_credito_valido', 0)
+            n_imp = diag.get('n_importe_valido', 0)
+            if n_deb or n_cred or n_imp:
+                st.write(f"**Débitos válidos:** {n_deb} | **Créditos válidos:** {n_cred}")
+            st.write(f"**Movimientos estimados:** {diag.get('n_movimientos_estimados', '—')}")
+            if diag.get("causa_falla"):
+                st.error(f"⚠ {diag['causa_falla']}")
             st.write(f"**Columnas encontradas:** {len(diag['columnas_disponibles'])}")
             if diag["columnas_detectadas"]:
                 st.write("**Detección automática:**")
@@ -668,14 +690,16 @@ with st.sidebar:
                     "Archivo": f.name,
                     "Tipo": f.name.rsplit(".", 1)[-1].upper(),
                     "Carpeta": "", "Banco": "", "Cuenta": "", "Moneda": "",
-                    "Hoja": "", "Fila header": "", "N° mov": 0,
-                    "Estado": "", "Observación": "",
+                    "Hoja": "", "Fila header": "",
+                    "Filas leídas": 0, "Fecha válida": 0,
+                    "Débitos": 0, "Créditos": 0,
+                    "N° mov": 0, "Estado": "", "Observación": "",
                 }
                 try:
                     meta = _get_file_metadata(f.name, f.size, cuentas, empresa_default)
                     diag_entry.update({"Banco": meta.get("banco",""), "Cuenta": meta.get("cuenta",""), "Moneda": meta.get("moneda","")})
                     info = load_file(f)
-                    diag_entry.update({"Hoja": info.selected_sheet, "Fila header": info.header_row})
+                    diag_entry.update({"Hoja": info.selected_sheet, "Fila header": info.header_row, "Filas leídas": len(info.df_raw)})
 
                     if info.ext == "pdf" and info.df_raw.empty:
                         diag_entry.update({"Estado": "Pendiente de OCR", "Observación": "PDF escaneado sin tablas detectables"})
@@ -699,6 +723,11 @@ with st.sidebar:
                         diag_entry.update({"N° mov": len(df_std), "Estado": "OK", "Observación": parser_name})
                     else:
                         diag_parsed = diagnose(info.df_raw)
+                        diag_entry.update({
+                            "Fecha válida": diag_parsed.get("n_fecha_valida", 0),
+                            "Débitos": diag_parsed.get("n_debito_valido", 0),
+                            "Créditos": diag_parsed.get("n_credito_valido", 0),
+                        })
                         st.session_state.cola_mapeo.append({
                             "filename":       info.filename,
                             "raw_bytes":      info.raw_bytes,
@@ -711,11 +740,15 @@ with st.sidebar:
                             "metadata":       meta,
                         })
                         necesitan_mapeo += 1
-                        diag_entry.update({"Estado": "Mapeo manual", "Observación": "No se detectaron columnas suficientes"})
+                        causa = diag_parsed.get("causa_falla") or "No se detectaron columnas suficientes"
+                        diag_entry.update({"Estado": "Mapeo manual", "Observación": causa})
 
                 except ValueError as e:
                     errores.append(f"**{f.name}**: {e}")
                     diag_entry.update({"Estado": "Error", "Observación": str(e)})
+                except Exception as e:
+                    errores.append(f"**{f.name}**: Error inesperado — {e}")
+                    diag_entry.update({"Estado": "Pendiente de revisión", "Observación": str(e)})
                 st.session_state.diagnostico.append(diag_entry)
 
             # ── Entradas del ZIP ─────────────────────────────────────────────
@@ -728,8 +761,10 @@ with st.sidebar:
                     "Tipo": entry.filename.rsplit(".", 1)[-1].upper(),
                     "Carpeta": entry.folder, "Banco": entry.bank,
                     "Cuenta": entry.cuenta, "Moneda": entry.moneda,
-                    "Hoja": "", "Fila header": "", "N° mov": 0,
-                    "Estado": "", "Observación": "",
+                    "Hoja": "", "Fila header": "",
+                    "Filas leídas": 0, "Fecha válida": 0,
+                    "Débitos": 0, "Créditos": 0,
+                    "N° mov": 0, "Estado": "", "Observación": "",
                 }
                 try:
                     meta = {
@@ -744,7 +779,7 @@ with st.sidebar:
                         "ruta_zip":       entry.zip_path,
                     }
                     info = load_zip_entry_to_loadinfo(entry)
-                    diag_entry.update({"Hoja": info.selected_sheet, "Fila header": info.header_row})
+                    diag_entry.update({"Hoja": info.selected_sheet, "Fila header": info.header_row, "Filas leídas": len(info.df_raw)})
 
                     if info.ext == "pdf" and info.df_raw.empty:
                         diag_entry.update({"Estado": "Pendiente de OCR", "Observación": "PDF escaneado sin tablas detectables"})
@@ -768,6 +803,11 @@ with st.sidebar:
                         diag_entry.update({"N° mov": len(df_std), "Estado": "OK", "Observación": parser_name})
                     else:
                         diag_parsed = diagnose(info.df_raw)
+                        diag_entry.update({
+                            "Fecha válida": diag_parsed.get("n_fecha_valida", 0),
+                            "Débitos": diag_parsed.get("n_debito_valido", 0),
+                            "Créditos": diag_parsed.get("n_credito_valido", 0),
+                        })
                         st.session_state.cola_mapeo.append({
                             "filename":       entry.filename,
                             "raw_bytes":      entry.raw_bytes,
@@ -780,14 +820,15 @@ with st.sidebar:
                             "metadata":       meta,
                         })
                         necesitan_mapeo += 1
-                        diag_entry.update({"Estado": "Mapeo manual", "Observación": "No se detectaron columnas suficientes"})
+                        causa = diag_parsed.get("causa_falla") or "No se detectaron columnas suficientes"
+                        diag_entry.update({"Estado": "Mapeo manual", "Observación": causa})
 
                 except ValueError as e:
                     errores.append(f"**{entry.zip_path}**: {e}")
-                    diag_entry.update({"Estado": "Error", "Observación": str(e)})
+                    diag_entry.update({"Estado": "Pendiente de revisión", "Observación": str(e)})
                 except Exception as e:
                     errores.append(f"**{entry.zip_path}**: Error inesperado — {e}")
-                    diag_entry.update({"Estado": "Error", "Observación": str(e)})
+                    diag_entry.update({"Estado": "Pendiente de revisión", "Observación": str(e)})
                 st.session_state.diagnostico.append(diag_entry)
 
             progress.empty()
@@ -852,7 +893,7 @@ with st.sidebar:
 
 # ─── Área principal ───────────────────────────────────────────────────────────
 st.title("Analizador de Extractos Bancarios")
-st.caption("Versión: ZIP multi-formato con encabezado estándar")
+st.caption("Versión: lectura robusta débito/crédito en ZIP")
 st.divider()
 
 cola = st.session_state.cola_mapeo
