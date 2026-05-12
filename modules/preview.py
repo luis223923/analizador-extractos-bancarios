@@ -224,8 +224,33 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
     # ── Título ───────────────────────────────────────────────────────────
     st.subheader("Vista previa de movimientos")
 
-    # ── Buscador general ─────────────────────────────────────────────────
-    col_search, col_clear = st.columns([5, 1])
+    # ── CSS compacto para métricas ────────────────────────────────────────
+    st.markdown("""
+    <style>
+    /* Métricas más pequeñas y sin recorte de texto */
+    [data-testid="metric-container"] {
+        padding: 6px 10px 6px 10px !important;
+        background: #f8f9fa;
+        border-radius: 6px;
+        border: 1px solid #e9ecef;
+    }
+    [data-testid="stMetricLabel"] p {
+        font-size: 0.68rem !important;
+        color: #6c757d !important;
+        margin-bottom: 2px !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 0.92rem !important;
+        font-weight: 600 !important;
+        white-space: nowrap !important;
+        overflow: visible !important;
+        line-height: 1.3 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Buscador + Rango de fechas en una fila ────────────────────────────
+    col_search, col_rango, col_clear = st.columns([4, 2, 1])
     with col_search:
         st.text_input(
             "🔍",
@@ -233,20 +258,21 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
             key="prev_buscar",
             label_visibility="collapsed",
         )
+    with col_rango:
+        rango = st.date_input(
+            "Rango de fechas",
+            value=(fecha_min, fecha_max),
+            min_value=fecha_min,
+            max_value=fecha_max,
+            key="prev_rango",
+            label_visibility="collapsed",
+        )
     with col_clear:
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🗑 Limpiar", use_container_width=True, key="prev_btn_limpiar"):
             for k in _FILTER_KEYS:
                 st.session_state.pop(k, None)
             st.rerun()
-
-    # ── Rango de fechas ───────────────────────────────────────────────────
-    rango = st.date_input(
-        "Rango de fechas",
-        value=(fecha_min, fecha_max),
-        min_value=fecha_min,
-        max_value=fecha_max,
-        key="prev_rango",
-    )
     if isinstance(rango, (list, tuple)) and len(rango) == 2:
         fd_activo, fh_activo = rango[0], rango[1]
     elif isinstance(rango, (list, tuple)) and len(rango) == 1:
@@ -342,13 +368,13 @@ def render_preview(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
     m6.metric("Crédito USD",  fmt_amount(_sum("credito_usd"), "USD"))
     m7.metric("Importe USD",  fmt_amount(_sum("importe_usd"), "USD"))
 
-    # ── Descarga ──────────────────────────────────────────────────────────
-    cap_col, dl_col = st.columns([4, 2])
+    # ── Descarga + caption ────────────────────────────────────────────────
+    cap_col, _, dl_col = st.columns([3, 2, 1])
     cap_col.caption(f"Mostrando **{len(filtered):,}** de **{len(df_valido):,}** movimientos.")
 
     if not filtered.empty:
         dl_col.download_button(
-            "⬇ Descargar resultados filtrados",
+            "⬇ Descargar",
             data=_to_excel_bytes(filtered.copy(), filters),
             file_name="movimientos_filtrados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
