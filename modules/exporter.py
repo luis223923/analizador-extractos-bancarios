@@ -298,7 +298,7 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
         "monto_exacto": mexac if mexac > 0 else None,
         "tolerancia":   _TOL_OPTIONS.get(tol_k, 0.01),
         "buscar_abs":   st.session_state.get("exp_abs", True),
-        "periodo":      periodo,
+
     }
 
     filtered = _apply_filters(df_valido, filters)
