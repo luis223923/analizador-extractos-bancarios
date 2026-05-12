@@ -6,7 +6,7 @@ Hoja 2 — "Auditoría de origen": trazabilidad completa (archivo, hoja, fila, Z
 """
 
 import unicodedata
-from datetime import date, timedelta, datetime
+from datetime import date, datetime
 from io import BytesIO
 
 import pandas as pd
@@ -61,16 +61,11 @@ _AUDIT_RENAME = {
     "archivo":       "Archivo origen",
 }
 _AMOUNT_COLS = ["debito_bob","credito_bob","importe_bob","debito_usd","credito_usd","importe_usd"]
-_PERIOD_OPTIONS = [
-    "Todo el período","Hoy","Ayer",
-    "Últimos 7 días","Últimos 30 días",
-    "Este mes","Mes anterior","Personalizado",
-]
 _TOL_OPTIONS = {"0.01": 0.01, "1": 1.0, "10": 10.0, "100": 100.0, "1,000": 1000.0}
 _FILTER_KEYS = [
     "exp_buscar","exp_banco","exp_cuenta","exp_moneda","exp_tipo",
-    "exp_fd","exp_fh","exp_mmin","exp_mmax","exp_mexacto",
-    "exp_tol","exp_abs","exp_periodo",
+    "exp_mmin","exp_mmax","exp_mexacto",
+    "exp_tol","exp_abs","exp_rango",
 ]
 
 
@@ -93,18 +88,6 @@ def _build_search_col(df: pd.DataFrame) -> pd.Series:
         combined = combined + " " + p
     return combined.apply(_norm)
 
-
-def _compute_period(periodo: str, fecha_min: date, fecha_max: date) -> tuple:
-    today = date.today()
-    if periodo == "Hoy":            return today, today
-    if periodo == "Ayer":           d = today - timedelta(days=1); return d, d
-    if periodo == "Últimos 7 días": return today - timedelta(days=6), today
-    if periodo == "Últimos 30 días":return today - timedelta(days=29), today
-    if periodo == "Este mes":       return today.replace(day=1), today
-    if periodo == "Mes anterior":
-        first = today.replace(day=1); last = first - timedelta(days=1)
-        return last.replace(day=1), last
-    return fecha_min, fecha_max
 
 
 def _apply_filters(df: pd.DataFrame, f: dict) -> pd.DataFrame:
@@ -188,7 +171,6 @@ def _to_excel(df_filtered: pd.DataFrame, filters_used: dict) -> bytes:
         ["Moneda",                     filters_used.get("moneda",       "Todas")],
         ["Tipo de movimiento",         filters_used.get("tipo_mov",     "Todos")],
         ["Texto buscado",              filters_used.get("buscar",       "")],
-        ["Período rápido",             filters_used.get("periodo",      "Todo el período")],
         ["Fecha desde",                str(filters_used.get("fecha_desde", ""))],
         ["Fecha hasta",                str(filters_used.get("fecha_hasta", ""))],
         ["Monto desde",                str(filters_used.get("monto_min",   "") or "")],
@@ -244,11 +226,21 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
                 st.session_state.pop(k, None)
             st.rerun()
 
-    # ── Filtros rápidos ───────────────────────────────────────────────────
-    st.caption("**Filtros rápidos:**")
-    st.radio("exp_p", _PERIOD_OPTIONS, index=0, key="exp_periodo",
-             horizontal=True, label_visibility="collapsed")
-    periodo = st.session_state.get("exp_periodo", "Todo el período")
+    # ── Rango de fechas ───────────────────────────────────────────────────
+    rango = st.date_input(
+        "Rango de fechas",
+        value=(fecha_min, fecha_max),
+        min_value=fecha_min,
+        max_value=fecha_max,
+        key="exp_rango",
+    )
+    if isinstance(rango, (list, tuple)) and len(rango) == 2:
+        fd_activo, fh_activo = rango[0], rango[1]
+    elif isinstance(rango, (list, tuple)) and len(rango) == 1:
+        fd_activo = fh_activo = rango[0]
+    else:
+        fd_activo = fh_activo = rango
+    st.caption(f"Rango aplicado: {fd_activo.strftime('%d/%m/%Y')} a {fh_activo.strftime('%d/%m/%Y')}")
 
     # ── Filtros avanzados ─────────────────────────────────────────────────
     with st.expander("⚙ Filtros avanzados", expanded=False):
@@ -276,21 +268,7 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
                          ["Todos","Créditos (ingresos)","Débitos (egresos)"],
                          key="exp_tipo")
 
-        r2a, r2b, r2c, r2d = st.columns(4)
-        fd_def, fh_def = _compute_period(periodo, fecha_min, fecha_max)
-
-        with r2a:
-            if periodo == "Personalizado":
-                st.date_input("Fecha desde", value=fd_def, min_value=fecha_min, max_value=fecha_max, key="exp_fd")
-            else:
-                st.date_input("Fecha desde", value=fd_def, min_value=fecha_min, max_value=fecha_max, key="exp_fd_d", disabled=True)
-
-        with r2b:
-            if periodo == "Personalizado":
-                st.date_input("Fecha hasta", value=fh_def, min_value=fecha_min, max_value=fecha_max, key="exp_fh")
-            else:
-                st.date_input("Fecha hasta", value=fh_def, min_value=fecha_min, max_value=fecha_max, key="exp_fh_d", disabled=True)
-
+        r2c, r2d = st.columns(2)
         with r2c:
             st.number_input("Monto desde", min_value=0.0, value=0.0, step=1.0, key="exp_mmin", format="%.2f")
             st.number_input("Monto hasta", min_value=0.0, value=0.0, step=1.0, key="exp_mmax", format="%.2f")
@@ -301,13 +279,6 @@ def render_exporter(df: pd.DataFrame, moneda: str = "Sin definir") -> None:
             st.checkbox("Buscar por valor absoluto", key="exp_abs", value=True)
 
     # ── Leer estado de filtros ────────────────────────────────────────────
-    if periodo == "Personalizado":
-        fd_activo = st.session_state.get("exp_fd", fd_def)
-        fh_activo = st.session_state.get("exp_fh", fh_def)
-    else:
-        fd_activo, fh_activo = _compute_period(periodo, fecha_min, fecha_max)
-        if periodo != "Todo el período":
-            st.caption(f"📅 {periodo}: {fd_activo.strftime('%d/%m/%Y')} — {fh_activo.strftime('%d/%m/%Y')}")
 
     tol_k = st.session_state.get("exp_tol", "0.01")
     mmin  = st.session_state.get("exp_mmin", 0.0) or 0.0
